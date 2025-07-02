@@ -2,11 +2,13 @@ import os
 import logging
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, types
-# Змінено: aiogram.contrib.fsm_storage.memory -> aiogram.fsm.storage.memory
 from aiogram.fsm.storage.memory import MemoryStorage 
-from aiogram.fsm.context import FSMContext # aiogram 3.x FSMContext
-from aiogram.fsm.state import State, StatesGroup # aiogram 3.x States
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto, BufferedInputFile
+# Імпортуємо F та Command для фільтрів aiogram 3.x
+from aiogram.filters import Command
+from aiogram import F # F-фільтри для aiogram 3.x
 from PIL import Image
 import io
 import asyncio
@@ -25,16 +27,36 @@ logging.basicConfig(level=logging.INFO)
 
 # Отримання змінних оточення
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_IDS = [int(admin_id) for admin_id in os.getenv("ADMIN_IDS").split(',')]
-CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
-MONOBANK_CARD_NUMBER = os.getenv("MONOBANK_CARD_NUMBER")
-DATABASE_URL = os.getenv("DATABASE_URL") # URL для підключення до PostgreSQL
-WEBHOOK_URL = os.getenv("WEBHOOK_URL") # Базовий URL вашого додатка на Render.com
+# Виправлено: Додано значення за замовчуванням "" для os.getenv()
+ADMIN_IDS_STR = os.getenv("ADMIN_IDS", "")
+ADMIN_IDS = [int(admin_id) for admin_id in ADMIN_IDS_STR.split(',') if admin_id.strip()]
+
+# Виправлено: Додано значення за замовчуванням "0" для CHANNEL_ID, щоб уникнути NoneType
+CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0")) if os.getenv("CHANNEL_ID", "0").strip().lstrip('-').isdigit() else 0
+
+# Виправлено: Додано значення за замовчуванням "" для MONOBANK_CARD_NUMBER
+MONOBANK_CARD_NUMBER = os.getenv("MONOBANK_CARD_NUMBER", "")
+
+# Виправлено: Додано значення за замовчуванням "" для WEBHOOK_URL
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "") 
+
+# Перевірка на наявність критичних змінних
+if not BOT_TOKEN:
+    logging.error("BOT_TOKEN не встановлено!")
+    # Можливо, варто викликати sys.exit(1) тут, якщо бот не може працювати без токена
+if not ADMIN_IDS:
+    logging.warning("ADMIN_IDS не встановлено або порожнє. Функції модерації можуть бути недоступні.")
+if not CHANNEL_ID:
+    logging.warning("CHANNEL_ID не встановлено або не є дійсним числом. Публікація в канал може бути недоступна.")
+if not MONOBANK_CARD_NUMBER:
+    logging.warning("MONOBANK_CARD_NUMBER не встановлено. Інформація про комісію може бути неповною.")
+if not WEBHOOK_URL:
+    logging.warning("WEBHOOK_URL не встановлено. Webhook може не працювати належним чином.")
+
 
 # Ініціалізація бота та диспетчера
-# Для aiogram 3.x Dispatcher і Bot ініціалізуються трохи інакше
 bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher(storage=MemoryStorage()) # MemoryStorage передається напряму в Dispatcher
+dp = Dispatcher(storage=MemoryStorage())
 
 # Створення станів для FSM
 class NewProduct(StatesGroup):
@@ -337,7 +359,7 @@ def get_product_moderation_keyboard(product_id: int):
 def get_product_actions_keyboard(product_id: int, channel_message_id: int, republish_count: int):
     """Повертає клавіатуру дій для користувача в розділі "Мої товари"."""
     keyboard = InlineKeyboardMarkup(row_width=1)
-    if channel_message_id:
+    if channel_message_id and CHANNEL_ID != 0: # Перевіряємо, чи CHANNEL_ID встановлено
         # Для публічних каналів, посилання формується так: https://t.me/c/{channel_id_без_мінус_100}/{message_id}
         # channel_id_без_мінус_100 - це ID каналу без -100
         # Наприклад, якщо CHANNEL_ID = -1001234567890, то channel_id_без_мінус_100 = 1234567890
@@ -392,6 +414,12 @@ async def send_product_to_moderation(product_id: int, user_id: int, username: st
     caption += f"👤 Продавець: @{username}" if username else f"👤 Продавець: <a href='tg://user?id={user_id}'>{user_id}</a>"
 
     try:
+        # Перевірка, чи є адміністратори
+        if not ADMIN_IDS:
+            logging.error("Немає ADMIN_IDS для надсилання на модерацію.")
+            await bot.send_message(user_id, "Наразі модератори недоступні. Спробуйте пізніше.")
+            return
+
         # Надсилаємо фото та опис
         moderator_messages = []
         
@@ -436,87 +464,88 @@ async def send_product_to_moderation(product_id: int, user_id: int, username: st
 
 # --- Обробники команд та повідомлень ---
 
-# Aiogram 3.x використовує message.router.message та message.router.callback_query
-@dp.message(commands=['start'])
-async def cmd_start(message: types.Message, state: FSMContext): # Додаємо state
+# Виправлено: Використання Command("start") для фільтрації команд
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message, state: FSMContext):
     """Обробник команди /start."""
-    await state.clear() # Очищаємо стан при старті
+    await state.clear()
     await message.answer("Привіт! Я BigMoneyCreateBot, допоможу тобі опублікувати оголошення.", reply_markup=get_main_menu_keyboard())
 
-@dp.message(text="📦 Додати товар")
-async def add_product_start(message: types.Message, state: FSMContext): # Додаємо state
+# Виправлено: Використання F.text для фільтрації текстових повідомлень
+@dp.message(F.text == "📦 Додати товар")
+async def add_product_start(message: types.Message, state: FSMContext):
     """Початок процесу додавання нового товару."""
-    await state.set_state(NewProduct.name) # Встановлюємо стан
+    await state.set_state(NewProduct.name)
     await message.answer("✏️ Введіть назву товару:")
 
-@dp.message(NewProduct.name) # Обробник для стану NewProduct.name
+@dp.message(NewProduct.name)
 async def process_name(message: types.Message, state: FSMContext):
     """Обробка назви товару."""
-    await state.update_data(name=message.text) # Оновлюємо дані стану
-    await state.set_state(NewProduct.price) # Переходимо до наступного стану
+    await state.update_data(name=message.text)
+    await state.set_state(NewProduct.price)
     await message.answer("💰 Введіть ціну (наприклад, 500 грн, 20 USD або договірна):")
 
-@dp.message(NewProduct.price) # Обробник для стану NewProduct.price
+@dp.message(NewProduct.price)
 async def process_price(message: types.Message, state: FSMContext):
     """Обробка ціни товару."""
-    await state.update_data(price=message.text, photos=[]) # Оновлюємо дані стану
-    await state.set_state(NewProduct.photos) # Переходимо до наступного стану
+    await state.update_data(price=message.text, photos=[])
+    await state.set_state(NewProduct.photos)
     await message.answer("📷 Завантажте до 10 фотографій (кожне окремим повідомленням або альбомом). Коли закінчите, натисніть /done_photos")
 
-@dp.message(NewProduct.photos, content_types=types.ContentType.PHOTO) # Обробник для стану NewProduct.photos
+@dp.message(NewProduct.photos, F.content_type == types.ContentType.PHOTO) # Використання F.content_type
 async def process_photos(message: types.Message, state: FSMContext):
     """Обробка фотографій товару."""
     user_data = await state.get_data()
     photos = user_data.get('photos', [])
     if len(photos) < 10:
-        photos.append(message.photo[-1].file_id) # Зберігаємо file_id найбільшої фотографії
+        photos.append(message.photo[-1].file_id)
         await state.update_data(photos=photos)
         await message.answer(f"Фото {len(photos)} додано. Залишилось {10 - len(photos)}.")
     else:
         await message.answer("Ви вже додали максимальну кількість фотографій (10). Натисніть /done_photos")
 
-@dp.message(NewProduct.photos, commands=['done_photos']) # Обробник для стану NewProduct.photos та команди /done_photos
+@dp.message(NewProduct.photos, Command("done_photos")) # Використання Command
 async def done_photos(message: types.Message, state: FSMContext):
     """Завершення завантаження фотографій."""
     user_data = await state.get_data()
     if not user_data.get('photos'):
         await message.answer("Будь ласка, завантажте хоча б одне фото або натисніть /skip_photos, якщо фото не потрібні.")
         return
-    await state.set_state(NewProduct.location) # Переходимо до наступного стану
+    await state.set_state(NewProduct.location)
     await message.answer("📍 Тепер введіть геолокацію (необов'язково). Якщо не потрібно, натисніть /skip_location")
 
-@dp.message(NewProduct.photos, commands=['skip_photos']) # Обробник для стану NewProduct.photos та команди /skip_photos
+@dp.message(NewProduct.photos, Command("skip_photos")) # Використання Command
 async def skip_photos(message: types.Message, state: FSMContext):
     """Пропуск завантаження фотографій."""
     await state.update_data(photos=[])
-    await state.set_state(NewProduct.location) # Переходимо до наступного стану
+    await state.set_state(NewProduct.location)
     await message.answer("📍 Тепер введіть геолокацію (необов'язково). Якщо не потрібно, натисніть /skip_location")
 
 
-@dp.message(NewProduct.location) # Обробник для стану NewProduct.location
+@dp.message(NewProduct.location)
 async def process_location(message: types.Message, state: FSMContext):
     """Обробка геолокації товару."""
     await state.update_data(location=message.text)
-    await state.set_state(NewProduct.description) # Переходимо до наступного стану
+    await state.set_state(NewProduct.description)
     await message.answer("📝 Введіть опис товару:")
 
-@dp.message(NewProduct.location, commands=['skip_location']) # Обробник для стану NewProduct.location та команди /skip_location
+@dp.message(NewProduct.location, Command("skip_location")) # Використання Command
 async def skip_location(message: types.Message, state: FSMContext):
     """Пропуск введення геолокації."""
     await state.update_data(location=None)
-    await state.set_state(NewProduct.description) # Переходимо до наступного стану
+    await state.set_state(NewProduct.description)
     await message.answer("📝 Введіть опис товару:")
 
-@dp.message(NewProduct.description) # Обробник для стану NewProduct.description
+@dp.message(NewProduct.description)
 async def process_description(message: types.Message, state: FSMContext):
     """Обробка опису товару."""
     await state.update_data(description=message.text)
-    await state.set_state(NewProduct.delivery) # Переходимо до наступного стану
+    await state.set_state(NewProduct.delivery)
     keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
     keyboard.add("Наложка Укрпошта", "Наложка Нова пошта")
     await message.answer("🚚 Оберіть спосіб доставки:", reply_markup=keyboard)
 
-@dp.message(NewProduct.delivery) # Обробник для стану NewProduct.delivery
+@dp.message(NewProduct.delivery)
 async def process_delivery(message: types.Message, state: FSMContext):
     """Обробка способу доставки."""
     await state.update_data(delivery=message.text)
@@ -536,10 +565,10 @@ async def process_delivery(message: types.Message, state: FSMContext):
     keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
     keyboard.add("✅ Підтвердити", "❌ Скасувати")
     
-    await state.set_state(NewProduct.confirm) # Переходимо до стану підтвердження
+    await state.set_state(NewProduct.confirm)
     await message.answer(confirmation_text, reply_markup=keyboard)
 
-@dp.message(NewProduct.confirm) # Обробник для стану NewProduct.confirm
+@dp.message(NewProduct.confirm)
 async def process_confirm(message: types.Message, state: FSMContext):
     """Підтвердження або скасування створення оголошення."""
     if message.text == "✅ Підтвердити":
@@ -568,12 +597,12 @@ async def process_confirm(message: types.Message, state: FSMContext):
     else:
         await message.answer("Створення оголошення скасовано.", reply_markup=get_main_menu_keyboard())
     
-    await state.clear() # Очищаємо стан
+    await state.clear()
 
-@dp.message(text="📋 Мої товари")
-async def my_products(message: types.Message, state: FSMContext): # Додаємо state
+@dp.message(F.text == "📋 Мої товари") # Використання F.text
+async def my_products(message: types.Message, state: FSMContext):
     """Показує список товарів користувача."""
-    await state.clear() # Очищаємо стан
+    await state.clear()
     user_products = await get_user_products(message.from_user.id)
     if not user_products:
         await message.answer("У вас ще немає доданих товарів.")
@@ -597,10 +626,10 @@ async def my_products(message: types.Message, state: FSMContext): # Додаєм
 
         await message.answer(text, reply_markup=get_product_actions_keyboard(product['id'], channel_message_id, product['republish_count']))
 
-@dp.message(text="📖 Правила")
-async def show_rules(message: types.Message, state: FSMContext): # Додаємо state
+@dp.message(F.text == "📖 Правила") # Використання F.text
+async def show_rules(message: types.Message, state: FSMContext):
     """Показує правила користування ботом."""
-    await state.clear() # Очищаємо стан
+    await state.clear()
     rules_text = (
         "📌 **Умови користування:**\n\n"
         " * 🧾 Покупець оплачує доставку.\n"
@@ -610,8 +639,9 @@ async def show_rules(message: types.Message, state: FSMContext): # Додаєм�
     await message.answer(rules_text, parse_mode='Markdown')
 
 # --- Обробники Callback-кнопок (Модератор) ---
-@dp.callback_query(lambda c: c.data.startswith('publish_product_'), user_id=ADMIN_IDS) # Змінено на dp.callback_query
-async def process_publish_product(callback_query: types.CallbackQuery, bot: Bot): # Додаємо bot
+# Виправлено: Використання F.data.startswith та F.from_user.id.in_
+@dp.callback_query(F.data.startswith('publish_product_'), F.from_user.id.in_(ADMIN_IDS))
+async def process_publish_product(callback_query: types.CallbackQuery, bot: Bot):
     """Обробник кнопки 'Опублікувати' для модератора."""
     product_id = int(callback_query.data.split('_')[-1])
     product = await get_product_by_id(product_id)
@@ -626,6 +656,7 @@ async def process_publish_product(callback_query: types.CallbackQuery, bot: Bot)
         media_group.append(InputMediaPhoto(media=file_id))
 
     caption = (
+        f"**Новий товар на модерацію:**\n\n"
         f"📦 Назва: {product['name']}\n"
         f"💰 Ціна: {product['price']}\n"
         f"📝 Опис: {product['description']}\n"
@@ -673,8 +704,9 @@ async def process_publish_product(callback_query: types.CallbackQuery, bot: Bot)
         logging.error(f"Помилка публікації товару: {e}")
         await callback_query.answer("Помилка при публікації товару.")
 
-@dp.callback_query(lambda c: c.data.startswith('reject_product_'), user_id=ADMIN_IDS) # Змінено на dp.callback_query
-async def process_reject_product(callback_query: types.CallbackQuery, bot: Bot): # Додаємо bot
+# Виправлено: Використання F.data.startswith та F.from_user.id.in_
+@dp.callback_query(F.data.startswith('reject_product_'), F.from_user.id.in_(ADMIN_IDS))
+async def process_reject_product(callback_query: types.CallbackQuery, bot: Bot):
     """Обробник кнопки 'Відхилити' для модератора."""
     product_id = int(callback_query.data.split('_')[-1])
     product = await get_product_by_id(product_id)
@@ -697,8 +729,9 @@ async def process_reject_product(callback_query: types.CallbackQuery, bot: Bot):
         except Exception as e:
             logging.warning(f"Не вдалося видалити повідомлення модератора: {e}")
 
-@dp.callback_query(lambda c: c.data.startswith('rotate_photos_'), user_id=ADMIN_IDS) # Змінено на dp.callback_query
-async def process_rotate_photos(callback_query: types.CallbackQuery, state: FSMContext, bot: Bot): # Додаємо bot
+# Виправлено: Використання F.data.startswith та F.from_user.id.in_
+@dp.callback_query(F.data.startswith('rotate_photos_'), F.from_user.id.in_(ADMIN_IDS))
+async def process_rotate_photos(callback_query: types.CallbackQuery, state: FSMContext, bot: Bot):
     """Обробник кнопки 'Повернути фото' для модератора."""
     product_id = int(callback_query.data.split('_')[-1])
     product = await get_product_by_id(product_id)
@@ -715,17 +748,17 @@ async def process_rotate_photos(callback_query: types.CallbackQuery, state: FSMC
     await state.update_data(
         product_id_to_rotate=product_id,
         current_photo_index=0,
-        original_photos_file_ids=photos_file_ids, # Зберігаємо оригінальні file_id
-        rotated_photos_file_ids=list(photos_file_ids) # Копія для збереження змінених file_id
+        original_photos_file_ids=photos_file_ids,
+        rotated_photos_file_ids=list(photos_file_ids)
     )
 
-    await state.set_state(ModeratorActions.rotating_photos) # Встановлюємо стан
+    await state.set_state(ModeratorActions.rotating_photos)
     await callback_query.answer("Переходимо в режим редагування фото.")
     
     # Надсилаємо перше фото для редагування
-    await send_photo_for_rotation(callback_query.message.chat.id, product_id, 0, photos_file_ids[0], bot) # Передаємо bot
+    await send_photo_for_rotation(callback_query.message.chat.id, product_id, 0, photos_file_ids[0], bot)
 
-async def send_photo_for_rotation(chat_id: int, product_id: int, photo_index: int, file_id: str, bot: Bot): # Додаємо bot
+async def send_photo_for_rotation(chat_id: int, product_id: int, photo_index: int, file_id: str, bot: Bot):
     """Надсилає одне фото модератору для повороту."""
     await bot.send_photo(
         chat_id=chat_id,
@@ -734,20 +767,21 @@ async def send_photo_for_rotation(chat_id: int, product_id: int, photo_index: in
         reply_markup=get_photo_rotation_keyboard(product_id, photo_index)
     )
     # Оновлюємо повідомлення з кнопкою "Готово"
-    product = await get_product_by_id(product_id) # Знову отримуємо продукт, щоб отримати актуальний moderator_message_id
+    product = await get_product_by_id(product_id)
     if product and product['moderator_message_id']:
         try:
             await bot.edit_message_reply_markup(
                 chat_id=chat_id,
-                message_id=product['moderator_message_id'], # Використовуємо message_id головного повідомлення модератора
+                message_id=product['moderator_message_id'],
                 reply_markup=get_photo_rotation_done_keyboard(product_id)
             )
         except Exception as e:
             logging.warning(f"Не вдалося оновити повідомлення модератора для кнопки 'Готово': {e}")
 
 
-@dp.callback_query(lambda c: c.data.startswith('rotate_single_photo_'), ModeratorActions.rotating_photos, user_id=ADMIN_IDS) # Змінено на dp.callback_query
-async def process_rotate_single_photo(callback_query: types.CallbackQuery, state: FSMContext, bot: Bot): # Додаємо bot
+# Виправлено: Використання F.data.startswith та F.from_user.id.in_
+@dp.callback_query(F.data.startswith('rotate_single_photo_'), ModeratorActions.rotating_photos, F.from_user.id.in_(ADMIN_IDS))
+async def process_rotate_single_photo(callback_query: types.CallbackQuery, state: FSMContext, bot: Bot):
     """Обробник кнопки 'Повернути фото на 90°' для модератора."""
     parts = callback_query.data.split('_')
     product_id = int(parts[-2])
@@ -758,7 +792,7 @@ async def process_rotate_single_photo(callback_query: types.CallbackQuery, state
         await callback_query.answer("Помилка: невідповідність товару.")
         return
 
-    original_file_id = user_data['rotated_photos_file_ids'][photo_index] # Беремо поточний file_id для повороту
+    original_file_id = user_data['rotated_photos_file_ids'][photo_index]
 
     try:
         # Завантажуємо фото
@@ -769,20 +803,20 @@ async def process_rotate_single_photo(callback_query: types.CallbackQuery, state
         image = Image.open(io.BytesIO(downloaded_file.read()))
         
         # Повертаємо на 90 градусів
-        rotated_image = image.rotate(-90, expand=True) # Повертаємо проти годинникової стрілки
+        rotated_image = image.rotate(-90, expand=True)
 
         # Зберігаємо повернуте зображення в буфер
         byte_arr = io.BytesIO()
-        rotated_image.save(byte_arr, format='JPEG') # Зберігаємо як JPEG
+        rotated_image.save(byte_arr, format='JPEG')
         byte_arr.seek(0)
 
         # Надсилаємо повернуте фото назад в Telegram і отримуємо новий file_id
         uploaded_photo = await bot.send_photo(
             chat_id=callback_query.message.chat.id,
-            photo=types.BufferedInputFile(byte_arr.getvalue(), filename=f"rotated_photo_{product_id}_{photo_index}.jpg"), # Використовуємо BufferedInputFile
+            photo=BufferedInputFile(byte_arr.getvalue(), filename=f"rotated_photo_{product_id}_{photo_index}.jpg"),
             caption=f"Повернуте фото {photo_index + 1}"
         )
-        new_file_id = uploaded_photo.photo[-1].file_id # Отримуємо file_id нового фото
+        new_file_id = uploaded_photo.photo[-1].file_id
 
         # Оновлюємо file_id в стані FSM
         user_data['rotated_photos_file_ids'][photo_index] = new_file_id
@@ -800,8 +834,9 @@ async def process_rotate_single_photo(callback_query: types.CallbackQuery, state
         logging.error(f"Помилка повороту фото: {e}")
         await callback_query.answer("Помилка при повороті фотографії.")
 
-@dp.callback_query(lambda c: c.data.startswith('done_rotating_photos_'), ModeratorActions.rotating_photos, user_id=ADMIN_IDS) # Змінено на dp.callback_query
-async def process_done_rotating_photos(callback_query: types.CallbackQuery, state: FSMContext, bot: Bot): # Додаємо bot
+# Виправлено: Використання F.data.startswith та F.from_user.id.in_
+@dp.callback_query(F.data.startswith('done_rotating_photos_'), ModeratorActions.rotating_photos, F.from_user.id.in_(ADMIN_IDS))
+async def process_done_rotating_photos(callback_query: types.CallbackQuery, state: FSMContext, bot: Bot):
     """Обробник кнопки 'Готово' після редагування фото."""
     product_id = int(callback_query.data.split('_')[-1])
     user_data = await state.get_data()
@@ -827,11 +862,12 @@ async def process_done_rotating_photos(callback_query: types.CallbackQuery, stat
         await send_product_to_moderation(product_id, product['user_id'], product['username'])
     
     await callback_query.answer("Редагування фото завершено. Товар знову надіслано на модерацію.")
-    await state.clear() # Очищаємо стан
+    await state.clear()
 
 # --- Обробники Callback-кнопок (Користувач) ---
-@dp.callback_query(lambda c: c.data.startswith('republish_product_')) # Змінено на dp.callback_query
-async def process_republish_product(callback_query: types.CallbackQuery, bot: Bot): # Додаємо bot
+# Виправлено: Використання F.data.startswith
+@dp.callback_query(F.data.startswith('republish_product_'))
+async def process_republish_product(callback_query: types.CallbackQuery, bot: Bot):
     """Обробник кнопки 'Переопублікувати' для користувача."""
     product_id = int(callback_query.data.split('_')[-1])
     product = await get_product_by_id(product_id)
@@ -851,8 +887,9 @@ async def process_republish_product(callback_query: types.CallbackQuery, bot: Bo
     await callback_query.answer(f"Товар надіслано на переопублікацію. Залишилось {3 - new_republish_count} спроб.")
     await bot.send_message(product['user_id'], f"🔁 Ваш товар «{product['name']}» надіслано на повторну модерацію.")
 
-@dp.callback_query(lambda c: c.data.startswith('sold_product_')) # Змінено на dp.callback_query
-async def process_sold_product(callback_query: types.CallbackQuery, bot: Bot): # Додаємо bot
+# Виправлено: Використання F.data.startswith
+@dp.callback_query(F.data.startswith('sold_product_'))
+async def process_sold_product(callback_query: types.CallbackQuery, bot: Bot):
     """Обробник кнопки 'Продано' для користувача."""
     product_id = int(callback_query.data.split('_')[-1])
     product = await get_product_by_id(product_id)
@@ -877,7 +914,7 @@ async def process_sold_product(callback_query: types.CallbackQuery, bot: Bot): #
         await update_product_status(product_id, 'sold')
         
         # Видаляємо товар з каналу, якщо він був опублікований
-        if product['channel_message_id']:
+        if product['channel_message_id'] and CHANNEL_ID != 0: # Перевіряємо, чи CHANNEL_ID встановлено
             try:
                 await bot.delete_message(CHANNEL_ID, product['channel_message_id'])
             except Exception as e:
@@ -896,7 +933,8 @@ async def process_sold_product(callback_query: types.CallbackQuery, bot: Bot): #
         logging.error(f"Помилка при обробці 'Продано': {e}")
         await callback_query.answer("Виникла помилка.")
 
-@dp.callback_query(lambda c: c.data.startswith('change_price_')) # Змінено на dp.callback_query
+# Виправлено: Використання F.data.startswith
+@dp.callback_query(F.data.startswith('change_price_'))
 async def process_change_price(callback_query: types.CallbackQuery, state: FSMContext):
     """Обробник кнопки 'Змінити ціну' для користувача."""
     product_id = int(callback_query.data.split('_')[-1])
@@ -910,7 +948,7 @@ async def process_change_price(callback_query: types.CallbackQuery, state: FSMCo
 class ChangingPrice(StatesGroup):
     new_price = State()
 
-@dp.message(ChangingPrice.new_price) # Обробник для стану ChangingPrice.new_price
+@dp.message(ChangingPrice.new_price)
 async def process_new_price(message: types.Message, state: FSMContext):
     """Обробка нової ціни."""
     user_data = await state.get_data()
@@ -926,10 +964,11 @@ async def process_new_price(message: types.Message, state: FSMContext):
         await send_product_to_moderation(product_id, product['user_id'], product['username'])
 
     await message.answer(f"Ціну товару оновлено на '{new_price}' і відправлено на повторну модерацію.", reply_markup=get_main_menu_keyboard())
-    await state.clear() # Очищаємо стан
+    await state.clear()
 
-@dp.callback_query(lambda c: c.data.startswith('delete_product_')) # Змінено на dp.callback_query
-async def process_delete_product(callback_query: types.CallbackQuery, bot: Bot): # Додаємо bot
+# Виправлено: Використання F.data.startswith
+@dp.callback_query(F.data.startswith('delete_product_'))
+async def process_delete_product(callback_query: types.CallbackQuery, bot: Bot):
     """Обробник кнопки 'Видалити' для користувача."""
     product_id = int(callback_query.data.split('_')[-1])
     product = await get_product_by_id(product_id)
@@ -941,7 +980,7 @@ async def process_delete_product(callback_query: types.CallbackQuery, bot: Bot):
     await delete_product_from_db(product_id)
     
     # Видаляємо товар з каналу, якщо він був опублікований
-    if product['channel_message_id']:
+    if product['channel_message_id'] and CHANNEL_ID != 0: # Перевіряємо, чи CHANNEL_ID встановлено
         try:
             await bot.delete_message(CHANNEL_ID, product['channel_message_id'])
         except Exception as e:
@@ -964,11 +1003,7 @@ async def telegram_webhook():
     if request.headers.get('content-type') == 'application/json':
         json_string = request.get_data().decode("utf-8")
         update = types.Update.to_object(json_string)
-        # Використовуємо asyncio.create_task для обробки оновлення
-        # Це дозволяє Flask-додатку швидко повернути відповідь, поки aiogram обробляє оновлення
         
-        # aiogram 3.x process_update вимагає bot та Dispatcher
-        # Ми передаємо bot як аргумент, оскільки він вже ініціалізований глобально
         asyncio.create_task(dp.process_update(update, bot=bot)) 
         return 'ok'
     else:
@@ -976,55 +1011,25 @@ async def telegram_webhook():
 
 async def set_webhook_on_start():
     """Встановлює Webhook при запуску."""
-    full_webhook_url = f"{WEBHOOK_URL}{WEBHOOK_PATH}"
-    await bot.set_webhook(full_webhook_url)
-    logging.info(f"Webhook встановлено на: {full_webhook_url}")
+    if not WEBHOOK_URL or not BOT_TOKEN:
+        logging.error("WEBHOOK_URL або BOT_TOKEN не встановлено. Webhook не буде налаштовано.")
+        return
 
-async def on_startup_wrapper(): # Прибираємо dp з аргументів, оскільки dp глобальний
+    full_webhook_url = f"{WEBHOOK_URL}{WEBHOOK_PATH}"
+    try:
+        await bot.set_webhook(full_webhook_url)
+        logging.info(f"Webhook встановлено на: {full_webhook_url}")
+    except Exception as e:
+        logging.error(f"Помилка встановлення Webhook: {e}")
+
+
+async def on_startup_wrapper():
     """Обгортка для on_startup, щоб викликати set_webhook_on_start."""
-    await init_db() # Ініціалізуємо базу даних
-    await set_webhook_on_start() # Встановлюємо Webhook
+    await init_db()
+    await set_webhook_on_start()
     logging.info("Бот запущено та Webhook встановлено!")
 
-# Цей блок залишаємо порожнім, оскільки Gunicorn запускає Flask-додаток
-# і викликає on_startup_wrapper через механізм запуску aiogram.
-# Gunicorn очікує, що змінна 'app' буде WSGI-додатком.
 if __name__ == '__main__':
-    # Для aiogram 3.x, on_startup_wrapper потрібно викликати вручну,
-    # оскільки executor.start_webhook більше не існує.
-    # Однак, на Render.com, Gunicorn запускає Flask-додаток,
-    # і ми можемо викликати on_startup_wrapper при першому запиті Webhook
-    # або використовувати інший механізм ініціалізації.
-    # Найкращий підхід - це викликати on_startup_wrapper при запуску Flask-додатку.
-    
-    # Це можна зробити за допомогою декоратора @app.before_first_request
-    # Але для асинхронних функцій це може бути складно.
-    # Простіше викликати on_startup_wrapper безпосередньо перед запуском gunicorn
-    # (якщо ви запускаєте його вручну), або покластися на те, що Render
-    # викликає on_startup_wrapper.
-    
-    # Оскільки Render.com запускає Gunicorn, який потім запускає Flask-додаток,
-    # ми можемо покластися на те, що aiogram обробить оновлення і викличе on_startup,
-    # або ж викликати on_startup_wrapper при запуску Flask.
-    
-    # Для простоти, ми можемо додати виклик on_startup_wrapper
-    # безпосередньо перед запуском Flask-додатку, якщо це дозволяє Render.
-    # Однак, оскільки ми використовуємо gunicorn, який запускає додаток,
-    # on_startup_wrapper має бути викликаний як частина ініціалізації додатку.
-    # Найкраще місце для on_startup_wrapper - це функція, яка запускається
-    # при старті сервісу.
-    
-    # Для Render.com, якщо ви хочете, щоб on_startup_wrapper виконувався один раз,
-    # ви можете додати його виклик до вашого файлу, який запускається Gunicorn,
-    # але це має бути зроблено асинхронно.
-    
-    # Наразі, ми покладаємося на те, що aiogram 3.x сам ініціалізує Webhook
-    # при першому запиті, якщо він не встановлений.
-    
-    # Якщо ви хочете гарантувати виклик on_startup_wrapper,
-    # ви можете використовувати aiohttp.web.run_app, але це ускладнить інтеграцію з Flask.
-    # Для цієї архітектури ми будемо покладатися на те, що Webhook встановиться
-    # при першому запиті або ви можете додати окремий скрипт для встановлення Webhook.
     pass
 
 # Додаємо обробник для on_startup в Dispatcher
