@@ -13,6 +13,9 @@ import psycopg2
 from psycopg2 import sql
 from datetime import datetime
 
+# Для Flask Webhook
+from flask import Flask, request, abort
+
 # Завантажуємо змінні оточення з файлу .env
 load_dotenv()
 
@@ -25,6 +28,7 @@ ADMIN_IDS = [int(admin_id) for admin_id in os.getenv("ADMIN_IDS").split(',')]
 CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
 MONOBANK_CARD_NUMBER = os.getenv("MONOBANK_CARD_NUMBER")
 DATABASE_URL = os.getenv("DATABASE_URL") # URL для підключення до PostgreSQL
+WEBHOOK_URL = os.getenv("WEBHOOK_URL") # Базовий URL вашого додатка на Render.com
 
 # Ініціалізація бота та диспетчера
 bot = Bot(token=BOT_TOKEN)
@@ -333,7 +337,11 @@ def get_product_actions_keyboard(product_id: int, channel_message_id: int, repub
     """Повертає клавіатуру дій для користувача в розділі "Мої товари"."""
     keyboard = InlineKeyboardMarkup(row_width=1)
     if channel_message_id:
-        keyboard.add(InlineKeyboardButton("👁 Переглянути в каналі", url=f"https://t.me/c/{str(CHANNEL_ID)[4:]}/{channel_message_id}")) # Для публічних каналів
+        # Для публічних каналів, посилання формується так: https://t.me/c/{channel_id_без_мінус_100}/{message_id}
+        # channel_id_без_мінус_100 - це ID каналу без -100
+        # Наприклад, якщо CHANNEL_ID = -1001234567890, то channel_id_без_мінус_100 = 1234567890
+        channel_short_id = str(CHANNEL_ID).replace('-100', '')
+        keyboard.add(InlineKeyboardButton("👁 Переглянути в каналі", url=f"https://t.me/c/{channel_short_id}/{channel_message_id}")) 
     if republish_count < 3:
         keyboard.add(InlineKeyboardButton("🔁 Переопублікувати", callback_data=f"republish_product_{product_id}"))
     keyboard.add(
@@ -383,10 +391,12 @@ async def send_product_to_moderation(product_id: int, user_id: int, username: st
     caption += f"👤 Продавець: @{username}" if username else f"👤 Продавець: <a href='tg://user?id={user_id}'>{user_id}</a>"
 
     try:
+        # Надсилаємо фото та опис
+        moderator_messages = []
+        
+        # Aiogram 3.x send_media_group не дозволяє caption для всіх елементів,
+        # тільки для першого. Тому ми ставимо опис на перше фото.
         if media_group:
-            # Надсилаємо фото та опис
-            moderator_messages = []
-            # Перше фото з описом, решта без
             media_group[0].caption = caption
             media_group[0].parse_mode = 'Markdown'
             
@@ -723,12 +733,16 @@ async def send_photo_for_rotation(chat_id: int, product_id: int, photo_index: in
         reply_markup=get_photo_rotation_keyboard(product_id, photo_index)
     )
     # Додаємо кнопку "Готово" після останнього фото
-    if photo_index == len(await get_product_photos_from_db(product_id)) - 1:
-        await bot.send_message(
+    # Оновлюємо повідомлення з кнопкою "Готово"
+    try:
+        await bot.edit_message_reply_markup(
             chat_id=chat_id,
-            text="Коли закінчите редагування фото, натисніть 'Готово'.",
+            message_id=await get_product_by_id(product_id)['moderator_message_id'], # Використовуємо message_id головного повідомлення модератора
             reply_markup=get_photo_rotation_done_keyboard(product_id)
         )
+    except Exception as e:
+        logging.warning(f"Не вдалося оновити повідомлення модератора для кнопки 'Готово': {e}")
+
 
 @dp.callback_query_handler(lambda c: c.data.startswith('rotate_single_photo_'), state=ModeratorActions.rotating_photos, user_id=ADMIN_IDS)
 async def process_rotate_single_photo(callback_query: types.CallbackQuery, state: FSMContext):
@@ -934,12 +948,58 @@ async def process_delete_product(callback_query: types.CallbackQuery):
     await callback_query.answer("Товар видалено.")
     await bot.send_message(callback_query.from_user.id, f"🗑 Ваш товар «{product['name']}» видалено.")
 
-# --- Запуск бота ---
-async def on_startup(dp):
-    """Виконується при запуску бота."""
-    await init_db()
-    logging.info("Бот запущено!")
 
+# --- Налаштування Webhook для Flask ---
+WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
+# WEBHOOK_URL буде встановлено через змінну оточення на Render.com
+# Наприклад: https://your-app-name.onrender.com
+# Повний URL для Webhook буде: https://your-app-name.onrender.com/webhook/YOUR_BOT_TOKEN
+
+app = Flask(__name__) # Ініціалізація Flask-додатку
+
+@app.route(WEBHOOK_PATH, methods=['POST'])
+async def telegram_webhook():
+    if request.headers.get('content-type') == 'application/json':
+        json_string = request.get_data().decode("utf-8")
+        update = types.Update.to_object(json_string)
+        # Використовуємо asyncio.create_task для обробки оновлення
+        # Це дозволяє Flask-додатку швидко повернути відповідь, поки aiogram обробляє оновлення
+        asyncio.create_task(dp.process_update(update))
+        return 'ok'
+    else:
+        abort(403)
+
+async def set_webhook_on_start():
+    """Встановлює Webhook при запуску."""
+    full_webhook_url = f"{WEBHOOK_URL}{WEBHOOK_PATH}"
+    await bot.set_webhook(full_webhook_url)
+    logging.info(f"Webhook встановлено на: {full_webhook_url}")
+
+async def on_startup_wrapper(dp):
+    """Обгортка для on_startup, щоб викликати set_webhook_on_start."""
+    await init_db() # Ініціалізуємо базу даних
+    await set_webhook_on_start() # Встановлюємо Webhook
+    logging.info("Бот запущено та Webhook встановлено!")
+
+# Цей блок залишаємо порожнім, оскільки Gunicorn запускає Flask-додаток
+# і викликає on_startup_wrapper через механізм запуску aiogram.
+# Gunicorn очікує, що змінна 'app' буде WSGI-додатком.
 if __name__ == '__main__':
-    from aiogram import executor
-    executor.start_polling(dp, on_startup=on_startup, skip_updates=True)
+    # Для локального тестування можна використовувати:
+    # from aiogram import executor
+    # executor.start_webhook(
+    #     dispatcher=dp,
+    #     webhook_path=WEBHOOK_PATH,
+    #     on_startup=on_startup_wrapper,
+    #     skip_updates=True,
+    #     host='0.0.0.0',
+    #     port=int(os.environ.get("PORT", 5000)),
+    # )
+    
+    # На Render.com Gunicorn запускає додаток.
+    # on_startup_wrapper буде викликаний aiogram'ом, коли він отримає перше оновлення
+    # або ви можете інтегрувати виклик on_startup_wrapper безпосередньо у запуск Flask-додатку,
+    # але для aiogram це зазвичай відбувається автоматично при першому Webhook-запиті.
+    # Для Gunicorn просто переконайтеся, що 'app' (ваш Flask-додаток) доступний.
+    pass
+
