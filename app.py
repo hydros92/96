@@ -16,7 +16,10 @@ from psycopg2 import sql
 from datetime import datetime
 
 # Для Flask Webhook
-from flask import Flask, request, abort
+from flask import Flask, request, abort, jsonify
+# Додано для інтеграції aiogram webhook з aiohttp
+from aiohttp import web
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_webhook
 
 # Завантажуємо змінні оточення з файлу .env
 load_dotenv()
@@ -27,18 +30,14 @@ logging.basicConfig(level=logging.INFO)
 # Отримання змінних оточення
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# Виправлено: Додано значення за замовчуванням "" для os.getenv()
 ADMIN_IDS_STR = os.getenv("ADMIN_IDS", "")
 ADMIN_IDS = [int(admin_id) for admin_id in ADMIN_IDS_STR.split(',') if admin_id.strip()]
 
-# Виправлено: Додано значення за замовчуванням "0" для CHANNEL_ID, щоб уникнути NoneType
 CHANNEL_ID_STR = os.getenv("CHANNEL_ID", "0")
 CHANNEL_ID = int(CHANNEL_ID_STR) if CHANNEL_ID_STR.strip().lstrip('-').isdigit() else 0
 
-# Виправлено: Додано значення за замовчуванням "" для MONOBANK_CARD_NUMBER
 MONOBANK_CARD_NUMBER = os.getenv("MONOBANK_CARD_NUMBER", "")
 
-# Виправлено: Додано значення за замовчуванням "" для WEBHOOK_URL
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "") 
 
 # Перевірка на наявність критичних змінних
@@ -55,12 +54,11 @@ if not WEBHOOK_URL:
 
 
 # Ініціалізація бота та диспетчера
-# Перевіряємо BOT_TOKEN перед ініціалізацією Bot
 if BOT_TOKEN:
     bot = Bot(token=BOT_TOKEN)
 else:
     logging.critical("Бот не може бути ініціалізований без BOT_TOKEN. Вихід.")
-    exit(1) # Виходимо з програми, якщо токен відсутній
+    exit(1)
 
 dp = Dispatcher(storage=MemoryStorage())
 
@@ -81,10 +79,10 @@ class ModeratorActions(StatesGroup):
 # --- База даних ---
 def get_db_connection():
     """Встановлює з'єднання з базою даних PostgreSQL."""
-    if not DATABASE_URL:
+    if not os.getenv("DATABASE_URL"):
         logging.error("DATABASE_URL не встановлено. Неможливо підключитися до бази даних.")
         raise ValueError("DATABASE_URL environment variable is not set.")
-    conn = psycopg2.connect(DATABASE_URL)
+    conn = psycopg2.connect(os.getenv("DATABASE_URL"))
     return conn
 
 async def init_db():
@@ -194,7 +192,6 @@ async def get_product_by_id(product_id: int):
         cur.execute("SELECT * FROM products WHERE id = %s;", (product_id,))
         product = cur.fetchone()
         if product:
-            # Повертаємо словник для зручності
             column_names = [desc[0] for desc in cur.description]
             return dict(zip(column_names, product))
         return None
@@ -328,9 +325,7 @@ async def update_product_photos_in_db(product_id: int, new_file_ids: list):
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        # Видаляємо старі фото
         cur.execute("DELETE FROM product_photos WHERE product_id = %s;", (product_id,))
-        # Додаємо нові фото
         for i, file_id in enumerate(new_file_ids):
             cur.execute(
                 """INSERT INTO product_photos (product_id, file_id, photo_index)
@@ -465,18 +460,21 @@ async def send_product_to_moderation(product_id: int, user_id: int, username: st
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
     """Обробник команди /start."""
+    logging.info(f"Отримано команду /start від {message.from_user.id}")
     await state.clear()
     await message.answer("Привіт! Я BigMoneyCreateBot, допоможу тобі опублікувати оголошення.", reply_markup=get_main_menu_keyboard())
 
 @dp.message(F.text == "📦 Додати товар")
 async def add_product_start(message: types.Message, state: FSMContext):
     """Початок процесу додавання нового товару."""
+    logging.info(f"Користувач {message.from_user.id} почав додавати товар.")
     await state.set_state(NewProduct.name)
     await message.answer("✏️ Введіть назву товару:")
 
 @dp.message(NewProduct.name)
 async def process_name(message: types.Message, state: FSMContext):
     """Обробка назви товару."""
+    logging.info(f"Користувач {message.from_user.id} ввів назву: {message.text}")
     await state.update_data(name=message.text)
     await state.set_state(NewProduct.price)
     await message.answer("💰 Введіть ціну (наприклад, 500 грн, 20 USD або договірна):")
@@ -484,6 +482,7 @@ async def process_name(message: types.Message, state: FSMContext):
 @dp.message(NewProduct.price)
 async def process_price(message: types.Message, state: FSMContext):
     """Обробка ціни товару."""
+    logging.info(f"Користувач {message.from_user.id} ввів ціну: {message.text}")
     await state.update_data(price=message.text, photos=[])
     await state.set_state(NewProduct.photos)
     await message.answer("📷 Завантажте до 10 фотографій (кожне окремим повідомленням або альбомом). Коли закінчите, натисніть /done_photos")
@@ -496,8 +495,10 @@ async def process_photos(message: types.Message, state: FSMContext):
     if len(photos) < 10:
         photos.append(message.photo[-1].file_id)
         await state.update_data(photos=photos)
+        logging.info(f"Користувач {message.from_user.id} додав фото. Всього: {len(photos)}")
         await message.answer(f"Фото {len(photos)} додано. Залишилось {10 - len(photos)}.")
     else:
+        logging.info(f"Користувач {message.from_user.id} спробував додати більше 10 фото.")
         await message.answer("Ви вже додали максимальну кількість фотографій (10). Натисніть /done_photos")
 
 @dp.message(NewProduct.photos, Command("done_photos"))
@@ -505,14 +506,17 @@ async def done_photos(message: types.Message, state: FSMContext):
     """Завершення завантаження фотографій."""
     user_data = await state.get_data()
     if not user_data.get('photos'):
+        logging.warning(f"Користувач {message.from_user.id} намагався завершити фото без фото.")
         await message.answer("Будь ласка, завантажте хоча б одне фото або натисніть /skip_photos, якщо фото не потрібні.")
         return
+    logging.info(f"Користувач {message.from_user.id} завершив завантаження фото.")
     await state.set_state(NewProduct.location)
     await message.answer("📍 Тепер введіть геолокацію (необов'язково). Якщо не потрібно, натисніть /skip_location")
 
 @dp.message(NewProduct.photos, Command("skip_photos"))
 async def skip_photos(message: types.Message, state: FSMContext):
     """Пропуск завантаження фотографій."""
+    logging.info(f"Користувач {message.from_user.id} пропустив завантаження фото.")
     await state.update_data(photos=[])
     await state.set_state(NewProduct.location)
     await message.answer("📍 Тепер введіть геолокацію (необов'язково). Якщо не потрібно, натисніть /skip_location")
@@ -521,6 +525,7 @@ async def skip_photos(message: types.Message, state: FSMContext):
 @dp.message(NewProduct.location)
 async def process_location(message: types.Message, state: FSMContext):
     """Обробка геолокації товару."""
+    logging.info(f"Користувач {message.from_user.id} ввів геолокацію: {message.text}")
     await state.update_data(location=message.text)
     await state.set_state(NewProduct.description)
     await message.answer("📝 Введіть опис товару:")
@@ -528,6 +533,7 @@ async def process_location(message: types.Message, state: FSMContext):
 @dp.message(NewProduct.location, Command("skip_location"))
 async def skip_location(message: types.Message, state: FSMContext):
     """Пропуск введення геолокації."""
+    logging.info(f"Користувач {message.from_user.id} пропустив введення геолокації.")
     await state.update_data(location=None)
     await state.set_state(NewProduct.description)
     await message.answer("📝 Введіть опис товару:")
@@ -535,6 +541,7 @@ async def skip_location(message: types.Message, state: FSMContext):
 @dp.message(NewProduct.description)
 async def process_description(message: types.Message, state: FSMContext):
     """Обробка опису товару."""
+    logging.info(f"Користувач {message.from_user.id} ввів опис.")
     await state.update_data(description=message.text)
     await state.set_state(NewProduct.delivery)
     keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
@@ -544,10 +551,10 @@ async def process_description(message: types.Message, state: FSMContext):
 @dp.message(NewProduct.delivery)
 async def process_delivery(message: types.Message, state: FSMContext):
     """Обробка способу доставки."""
+    logging.info(f"Користувач {message.from_user.id} обрав доставку: {message.text}")
     await state.update_data(delivery=message.text)
     user_data = await state.get_data()
     
-    # Формуємо підтвердження
     confirmation_text = (
         f"Будь ласка, перевірте введені дані:\n\n"
         f"📦 Назва: {user_data['name']}\n"
@@ -567,6 +574,7 @@ async def process_delivery(message: types.Message, state: FSMContext):
 @dp.message(NewProduct.confirm)
 async def process_confirm(message: types.Message, state: FSMContext):
     """Підтвердження або скасування створення оголошення."""
+    logging.info(f"Користувач {message.from_user.id} підтверджує/скасовує оголошення: {message.text}")
     if message.text == "✅ Підтвердити":
         user_data = await state.get_data()
         user_id = message.from_user.id
@@ -598,6 +606,7 @@ async def process_confirm(message: types.Message, state: FSMContext):
 @dp.message(F.text == "📋 Мої товари")
 async def my_products(message: types.Message, state: FSMContext):
     """Показує список товарів користувача."""
+    logging.info(f"Користувач {message.from_user.id} переглядає свої товари.")
     await state.clear()
     user_products = await get_user_products(message.from_user.id)
     if not user_products:
@@ -624,6 +633,7 @@ async def my_products(message: types.Message, state: FSMContext):
 @dp.message(F.text == "📖 Правила")
 async def show_rules(message: types.Message, state: FSMContext):
     """Показує правила користування ботом."""
+    logging.info(f"Користувач {message.from_user.id} переглядає правила.")
     await state.clear()
     rules_text = (
         "📌 **Умови користування:**\n\n"
@@ -638,6 +648,7 @@ async def show_rules(message: types.Message, state: FSMContext):
 async def process_publish_product(callback_query: types.CallbackQuery, bot: Bot):
     """Обробник кнопки 'Опублікувати' для модератора."""
     product_id = int(callback_query.data.split('_')[-1])
+    logging.info(f"Модератор {callback_query.from_user.id} натиснув 'Опублікувати' для товару {product_id}")
     product = await get_product_by_id(product_id)
     
     if not product:
@@ -702,6 +713,7 @@ async def process_publish_product(callback_query: types.CallbackQuery, bot: Bot)
 async def process_reject_product(callback_query: types.CallbackQuery, bot: Bot):
     """Обробник кнопки 'Відхилити' для модератора."""
     product_id = int(callback_query.data.split('_')[-1])
+    logging.info(f"Модератор {callback_query.from_user.id} натиснув 'Відхилити' для товару {product_id}")
     product = await get_product_by_id(product_id)
     
     if not product:
@@ -724,6 +736,7 @@ async def process_reject_product(callback_query: types.CallbackQuery, bot: Bot):
 async def process_rotate_photos(callback_query: types.CallbackQuery, state: FSMContext, bot: Bot):
     """Обробник кнопки 'Повернути фото' для модератора."""
     product_id = int(callback_query.data.split('_')[-1])
+    logging.info(f"Модератор {callback_query.from_user.id} натиснув 'Повернути фото' для товару {product_id}")
     product = await get_product_by_id(product_id)
 
     if not product:
@@ -749,6 +762,7 @@ async def process_rotate_photos(callback_query: types.CallbackQuery, state: FSMC
 
 async def send_photo_for_rotation(chat_id: int, product_id: int, photo_index: int, file_id: str, bot: Bot):
     """Надсилає одне фото модератору для повороту."""
+    logging.info(f"Надсилання фото {photo_index} товару {product_id} для повороту.")
     await bot.send_photo(
         chat_id=chat_id,
         photo=file_id,
@@ -773,6 +787,7 @@ async def process_rotate_single_photo(callback_query: types.CallbackQuery, state
     parts = callback_query.data.split('_')
     product_id = int(parts[-2])
     photo_index = int(parts[-1])
+    logging.info(f"Модератор {callback_query.from_user.id} повертає фото {photo_index} товару {product_id}.")
 
     user_data = await state.get_data()
     if user_data['product_id_to_rotate'] != product_id:
@@ -818,6 +833,7 @@ async def process_rotate_single_photo(callback_query: types.CallbackQuery, state
 async def process_done_rotating_photos(callback_query: types.CallbackQuery, state: FSMContext, bot: Bot):
     """Обробник кнопки 'Готово' після редагування фото."""
     product_id = int(callback_query.data.split('_')[-1])
+    logging.info(f"Модератор {callback_query.from_user.id} завершив редагування фото для товару {product_id}.")
     user_data = await state.get_data()
     if user_data['product_id_to_rotate'] != product_id:
         await callback_query.answer("Помилка: невідповідність товару.")
@@ -846,6 +862,7 @@ async def process_done_rotating_photos(callback_query: types.CallbackQuery, stat
 async def process_republish_product(callback_query: types.CallbackQuery, bot: Bot):
     """Обробник кнопки 'Переопублікувати' для користувача."""
     product_id = int(callback_query.data.split('_')[-1])
+    logging.info(f"Користувач {callback_query.from_user.id} натиснув 'Переопублікувати' для товару {product_id}.")
     product = await get_product_by_id(product_id)
 
     if not product:
@@ -867,6 +884,7 @@ async def process_republish_product(callback_query: types.CallbackQuery, bot: Bo
 async def process_sold_product(callback_query: types.CallbackQuery, bot: Bot):
     """Обробник кнопки 'Продано' для користувача."""
     product_id = int(callback_query.data.split('_')[-1])
+    logging.info(f"Користувач {callback_query.from_user.id} натиснув 'Продано' для товару {product_id}.")
     product = await get_product_by_id(product_id)
 
     if not product:
@@ -910,6 +928,7 @@ async def process_sold_product(callback_query: types.CallbackQuery, bot: Bot):
 async def process_change_price(callback_query: types.CallbackQuery, state: FSMContext):
     """Обробник кнопки 'Змінити ціну' для користувача."""
     product_id = int(callback_query.data.split('_')[-1])
+    logging.info(f"Користувач {callback_query.from_user.id} натиснув 'Змінити ціну' для товару {product_id}.")
     
     await state.set_state('ChangingPrice.new_price')
     await state.update_data(product_id_to_change_price=product_id)
@@ -923,6 +942,7 @@ class ChangingPrice(StatesGroup):
 @dp.message(ChangingPrice.new_price)
 async def process_new_price(message: types.Message, state: FSMContext):
     """Обробка нової ціни."""
+    logging.info(f"Користувач {message.from_user.id} ввів нову ціну: {message.text}")
     user_data = await state.get_data()
     product_id = user_data['product_id_to_change_price']
     new_price = message.text
@@ -941,6 +961,7 @@ async def process_new_price(message: types.Message, state: FSMContext):
 async def process_delete_product(callback_query: types.CallbackQuery, bot: Bot):
     """Обробник кнопки 'Видалити' для користувача."""
     product_id = int(callback_query.data.split('_')[-1])
+    logging.info(f"Користувач {callback_query.from_user.id} натиснув 'Видалити' для товару {product_id}.")
     product = await get_product_by_id(product_id)
 
     if not product:
@@ -962,10 +983,11 @@ async def process_delete_product(callback_query: types.CallbackQuery, bot: Bot):
 # --- Налаштування Webhook для Flask ---
 app = Flask(__name__)
 
-# Перенесено визначення WEBHOOK_PATH всередину функції, щоб BOT_TOKEN був доступний
-# і перевірений.
-async def set_webhook_on_start():
-    """Встановлює Webhook при запуску."""
+async def on_startup_webhook(app: web.Application):
+    """
+    Функція, яка виконується при запуску aiohttp веб-сервера.
+    Встановлює вебхук для Telegram.
+    """
     if not WEBHOOK_URL:
         logging.error("❌ WEBHOOK_URL не встановлено. Webhook не буде налаштовано.")
         return
@@ -973,11 +995,12 @@ async def set_webhook_on_start():
         logging.error("❌ BOT_TOKEN не встановлено. Webhook не буде налаштовано.")
         return
 
-    WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
-    full_webhook_url = f"{WEBHOOK_URL}{WEBHOOK_PATH}"
+    base_url = WEBHOOK_URL.rstrip('/')
+    webhook_path = f"/webhook/{BOT_TOKEN}"
+    full_webhook_url = f"{base_url}{webhook_path}"
+    
     logging.info(f"ℹ️ Спроба встановити Webhook на: {full_webhook_url}")
     try:
-        # Перевіряємо поточний вебхук, щоб уникнути зайвих запитів
         current_webhook_info = await bot.get_webhook_info()
         if current_webhook_info.url != full_webhook_url:
             await bot.set_webhook(full_webhook_url)
@@ -987,17 +1010,65 @@ async def set_webhook_on_start():
     except Exception as e:
         logging.error(f"❌ Помилка встановлення Webhook: {e}")
 
+async def on_shutdown_webhook(app: web.Application):
+    """
+    Функція, яка виконується при зупинці aiohttp веб-сервера.
+    Видаляє вебхук з Telegram.
+    """
+    logging.info("ℹ️ Видалення Webhook...")
+    try:
+        await bot.delete_webhook()
+        logging.info("✅ Webhook успішно видалено.")
+    except Exception as e:
+        logging.error(f"❌ Помилка видалення Webhook: {e}")
 
-async def on_startup_wrapper():
-    """Обгортка для on_startup, щоб викликати set_webhook_on_start."""
-    logging.info("🚀 Запуск бота...")
-    await init_db()
-    await set_webhook_on_start()
+async def main():
+    """Основна функція для запуску бота та веб-сервера."""
+    await init_db() # Ініціалізуємо базу даних
+    
+    # Створюємо aiohttp додаток
+    aiohttp_app = web.Application()
+    
+    # Додаємо обробник для вебхука Telegram
+    # Це буде обробляти POST-запити на /webhook/{BOT_TOKEN}
+    webhook_path = f"/webhook/{BOT_TOKEN}"
+    SimpleRequestHandler(dispatcher=dp, bot=bot).register(aiohttp_app, path=webhook_path)
+
+    # Реєструємо функції запуску/зупинки для aiohttp
+    aiohttp_app.on_startup.append(on_startup_webhook)
+    aiohttp_app.on_shutdown.append(on_shutdown_webhook)
+
+    # Запускаємо aiohttp веб-сервер
+    # Для Render.com порт зазвичай 10000 і хост 0.0.0.0
+    runner = web.AppRunner(aiohttp_app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', os.getenv("PORT", 10000)) # Використовуємо змінну оточення PORT
+    await site.start()
+    
     logging.info("🎉 Бот запущено та готовий до роботи!")
+    
+    # Тримаємо основний цикл подій активним
+    while True:
+        await asyncio.sleep(3600) # Спимо годину, щоб додаток не завершився
+
+# Додаємо health check endpoint для Flask, якщо Flask все ще використовується для інших цілей
+@app.route('/')
+def health_check():
+    return jsonify({"status": "ok", "message": "Bot service is running."}), 200
+
+# Залишаємо цей маршрут, якщо ви все ще використовуєте Flask для чогось,
+# але основний вебхук Telegram тепер обробляється aiohttp.
+# Якщо Flask не потрібен для інших маршрутів, його можна видалити.
+# Якщо ви все ж хочете використовувати Flask для вебхука, то потрібно
+# інтегрувати aiohttp-сервер в Flask, що складніше.
+# Наразі, ми запускаємо aiogram webhook через aiohttp паралельно з Flask.
+# Якщо ви запускаєте gunicorn app:app, то Flask буде запущено.
+# Якщо ви хочете використовувати aiogram з aiohttp, то команда запуску має бути іншою.
+
+# Для Render.com, якщо ви хочете використовувати aiohttp, команда запуску має бути:
+# python app.py
 
 if __name__ == '__main__':
-    pass
-
-# Додаємо обробник для on_startup в Dispatcher
-dp.startup.register(on_startup_wrapper)
+    # Запускаємо основну асинхронну функцію
+    asyncio.run(main())
 
