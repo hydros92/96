@@ -6,9 +6,8 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto, BufferedInputFile
-# Імпортуємо F та Command для фільтрів aiogram 3.x
 from aiogram.filters import Command
-from aiogram import F # F-фільтри для aiogram 3.x
+from aiogram import F
 from PIL import Image
 import io
 import asyncio
@@ -27,12 +26,14 @@ logging.basicConfig(level=logging.INFO)
 
 # Отримання змінних оточення
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+
 # Виправлено: Додано значення за замовчуванням "" для os.getenv()
 ADMIN_IDS_STR = os.getenv("ADMIN_IDS", "")
 ADMIN_IDS = [int(admin_id) for admin_id in ADMIN_IDS_STR.split(',') if admin_id.strip()]
 
 # Виправлено: Додано значення за замовчуванням "0" для CHANNEL_ID, щоб уникнути NoneType
-CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0")) if os.getenv("CHANNEL_ID", "0").strip().lstrip('-').isdigit() else 0
+CHANNEL_ID_STR = os.getenv("CHANNEL_ID", "0")
+CHANNEL_ID = int(CHANNEL_ID_STR) if CHANNEL_ID_STR.strip().lstrip('-').isdigit() else 0
 
 # Виправлено: Додано значення за замовчуванням "" для MONOBANK_CARD_NUMBER
 MONOBANK_CARD_NUMBER = os.getenv("MONOBANK_CARD_NUMBER", "")
@@ -42,20 +43,25 @@ WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
 
 # Перевірка на наявність критичних змінних
 if not BOT_TOKEN:
-    logging.error("BOT_TOKEN не встановлено!")
-    # Можливо, варто викликати sys.exit(1) тут, якщо бот не може працювати без токена
+    logging.error("❌ BOT_TOKEN не встановлено! Бот не зможе працювати без токена.")
 if not ADMIN_IDS:
-    logging.warning("ADMIN_IDS не встановлено або порожнє. Функції модерації можуть бути недоступні.")
+    logging.warning("⚠️ ADMIN_IDS не встановлено або порожнє. Функції модерації можуть бути недоступні.")
 if not CHANNEL_ID:
-    logging.warning("CHANNEL_ID не встановлено або не є дійсним числом. Публікація в канал може бути недоступна.")
+    logging.warning("⚠️ CHANNEL_ID не встановлено або не є дійсним числом. Публікація в канал може бути недоступна.")
 if not MONOBANK_CARD_NUMBER:
-    logging.warning("MONOBANK_CARD_NUMBER не встановлено. Інформація про комісію може бути неповною.")
+    logging.warning("⚠️ MONOBANK_CARD_NUMBER не встановлено. Інформація про комісію може бути неповною.")
 if not WEBHOOK_URL:
-    logging.warning("WEBHOOK_URL не встановлено. Webhook може не працювати належним чином.")
+    logging.warning("⚠️ WEBHOOK_URL не встановлено. Webhook може не працювати належним чином.")
 
 
 # Ініціалізація бота та диспетчера
-bot = Bot(token=BOT_TOKEN)
+# Перевіряємо BOT_TOKEN перед ініціалізацією Bot
+if BOT_TOKEN:
+    bot = Bot(token=BOT_TOKEN)
+else:
+    logging.critical("Бот не може бути ініціалізований без BOT_TOKEN. Вихід.")
+    exit(1) # Виходимо з програми, якщо токен відсутній
+
 dp = Dispatcher(storage=MemoryStorage())
 
 # Створення станів для FSM
@@ -75,6 +81,9 @@ class ModeratorActions(StatesGroup):
 # --- База даних ---
 def get_db_connection():
     """Встановлює з'єднання з базою даних PostgreSQL."""
+    if not DATABASE_URL:
+        logging.error("DATABASE_URL не встановлено. Неможливо підключитися до бази даних.")
+        raise ValueError("DATABASE_URL environment variable is not set.")
     conn = psycopg2.connect(DATABASE_URL)
     return conn
 
@@ -111,9 +120,9 @@ async def init_db():
             );
         """)
         conn.commit()
-        logging.info("База даних ініціалізована успішно.")
+        logging.info("✅ База даних ініціалізована успішно.")
     except Exception as e:
-        logging.error(f"Помилка ініціалізації бази даних: {e}")
+        logging.error(f"❌ Помилка ініціалізації бази даних: {e}")
     finally:
         if conn:
             conn.close()
@@ -133,7 +142,7 @@ async def add_product_to_db(user_id: int, username: str, name: str, price: str, 
         conn.commit()
         return product_id
     except Exception as e:
-        logging.error(f"Помилка додавання товару до БД: {e}")
+        logging.error(f"❌ Помилка додавання товару до БД: {e}")
         return None
     finally:
         if conn:
@@ -152,7 +161,7 @@ async def add_product_photo_to_db(product_id: int, file_id: str, photo_index: in
         )
         conn.commit()
     except Exception as e:
-        logging.error(f"Помилка додавання фото до БД: {e}")
+        logging.error(f"❌ Помилка додавання фото до БД: {e}")
     finally:
         if conn:
             conn.close()
@@ -170,7 +179,7 @@ async def get_product_photos_from_db(product_id: int):
         photos = [row[0] for row in cur.fetchall()]
         return photos
     except Exception as e:
-        logging.error(f"Помилка отримання фото з БД: {e}")
+        logging.error(f"❌ Помилка отримання фото з БД: {e}")
         return []
     finally:
         if conn:
@@ -190,7 +199,7 @@ async def get_product_by_id(product_id: int):
             return dict(zip(column_names, product))
         return None
     except Exception as e:
-        logging.error(f"Помилка отримання товару за ID: {e}")
+        logging.error(f"❌ Помилка отримання товару за ID: {e}")
         return None
     finally:
         if conn:
@@ -216,7 +225,7 @@ async def get_user_products(user_id: int):
             })
         return products
     except Exception as e:
-        logging.error(f"Помилка отримання товарів користувача: {e}")
+        logging.error(f"❌ Помилка отримання товарів користувача: {e}")
         return []
     finally:
         if conn:
@@ -240,7 +249,7 @@ async def update_product_status(product_id: int, status: str, channel_message_id
             )
         conn.commit()
     except Exception as e:
-        logging.error(f"Помилка оновлення статусу товару: {e}")
+        logging.error(f"❌ Помилка оновлення статусу товару: {e}")
     finally:
         if conn:
             conn.close()
@@ -257,7 +266,7 @@ async def update_product_moderator_message_id(product_id: int, message_id: int):
         )
         conn.commit()
     except Exception as e:
-        logging.error(f"Помилка оновлення ID повідомлення модератору: {e}")
+        logging.error(f"❌ Помилка оновлення ID повідомлення модератору: {e}")
     finally:
         if conn:
             conn.close()
@@ -271,7 +280,7 @@ async def delete_product_from_db(product_id: int):
         cur.execute("DELETE FROM products WHERE id = %s;", (product_id,))
         conn.commit()
     except Exception as e:
-        logging.error(f"Помилка видалення товару з БД: {e}")
+        logging.error(f"❌ Помилка видалення товару з БД: {e}")
     finally:
         if conn:
             conn.close()
@@ -288,7 +297,7 @@ async def update_product_price(product_id: int, new_price: str):
         )
         conn.commit()
     except Exception as e:
-        logging.error(f"Помилка оновлення ціни товару: {e}")
+        logging.error(f"❌ Помилка оновлення ціни товару: {e}")
     finally:
         if conn:
             conn.close()
@@ -307,7 +316,7 @@ async def increment_product_republish_count(product_id: int):
         conn.commit()
         return new_count
     except Exception as e:
-        logging.error(f"Помилка збільшення лічильника переопублікацій: {e}")
+        logging.error(f"❌ Помилка збільшення лічильника переопублікацій: {e}")
         return None
     finally:
         if conn:
@@ -330,7 +339,7 @@ async def update_product_photos_in_db(product_id: int, new_file_ids: list):
             )
         conn.commit()
     except Exception as e:
-        logging.error(f"Помилка оновлення фотографій товару в БД: {e}")
+        logging.error(f"❌ Помилка оновлення фотографій товару в БД: {e}")
     finally:
         if conn:
             conn.close()
@@ -359,10 +368,7 @@ def get_product_moderation_keyboard(product_id: int):
 def get_product_actions_keyboard(product_id: int, channel_message_id: int, republish_count: int):
     """Повертає клавіатуру дій для користувача в розділі "Мої товари"."""
     keyboard = InlineKeyboardMarkup(row_width=1)
-    if channel_message_id and CHANNEL_ID != 0: # Перевіряємо, чи CHANNEL_ID встановлено
-        # Для публічних каналів, посилання формується так: https://t.me/c/{channel_id_без_мінус_100}/{message_id}
-        # channel_id_без_мінус_100 - це ID каналу без -100
-        # Наприклад, якщо CHANNEL_ID = -1001234567890, то channel_id_без_мінус_100 = 1234567890
+    if channel_message_id and CHANNEL_ID != 0:
         channel_short_id = str(CHANNEL_ID).replace('-100', '')
         keyboard.add(InlineKeyboardButton("👁 Переглянути в каналі", url=f"https://t.me/c/{channel_short_id}/{channel_message_id}")) 
     if republish_count < 3:
@@ -414,41 +420,33 @@ async def send_product_to_moderation(product_id: int, user_id: int, username: st
     caption += f"👤 Продавець: @{username}" if username else f"👤 Продавець: <a href='tg://user?id={user_id}'>{user_id}</a>"
 
     try:
-        # Перевірка, чи є адміністратори
         if not ADMIN_IDS:
-            logging.error("Немає ADMIN_IDS для надсилання на модерацію.")
+            logging.error("Немає ADMIN_IDS для надсилання на модерацію. Повідомлення не буде надіслано модераторам.")
             await bot.send_message(user_id, "Наразі модератори недоступні. Спробуйте пізніше.")
             return
 
-        # Надсилаємо фото та опис
         moderator_messages = []
         
-        # Aiogram 3.x send_media_group не дозволяє caption для всіх елементів,
-        # тільки для першого. Тому ми ставимо опис на перше фото.
         if media_group:
             media_group[0].caption = caption
             media_group[0].parse_mode = 'Markdown'
             
-            # Розбиваємо media_group на частини по 10 фото, якщо їх більше
             for i in range(0, len(media_group), 10):
                 chunk = media_group[i:i+10]
                 sent_messages = await bot.send_media_group(
-                    chat_id=ADMIN_IDS[0], # Відправляємо першому адміну
+                    chat_id=ADMIN_IDS[0],
                     media=chunk
                 )
                 moderator_messages.extend(sent_messages)
 
-            # Надсилаємо клавіатуру модератору окремим повідомленням
             moderator_keyboard_message = await bot.send_message(
                 chat_id=ADMIN_IDS[0],
                 text="Оберіть дію:",
                 reply_markup=get_product_moderation_keyboard(product_id)
             )
-            # Зберігаємо ID повідомлення з клавіатурою для модератора
             await update_product_moderator_message_id(product_id, moderator_keyboard_message.message_id)
 
         else:
-            # Якщо фото немає, надсилаємо тільки текст
             moderator_message = await bot.send_message(
                 chat_id=ADMIN_IDS[0],
                 text=caption,
@@ -457,21 +455,19 @@ async def send_product_to_moderation(product_id: int, user_id: int, username: st
             )
             await update_product_moderator_message_id(product_id, moderator_message.message_id)
 
-        logging.info(f"Товар {product_id} надіслано на модерацію.")
+        logging.info(f"✅ Товар {product_id} надіслано на модерацію.")
     except Exception as e:
-        logging.error(f"Помилка надсилання товару на модерацію: {e}")
+        logging.error(f"❌ Помилка надсилання товару на модерацію: {e}")
 
 
 # --- Обробники команд та повідомлень ---
 
-# Виправлено: Використання Command("start") для фільтрації команд
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
     """Обробник команди /start."""
     await state.clear()
     await message.answer("Привіт! Я BigMoneyCreateBot, допоможу тобі опублікувати оголошення.", reply_markup=get_main_menu_keyboard())
 
-# Виправлено: Використання F.text для фільтрації текстових повідомлень
 @dp.message(F.text == "📦 Додати товар")
 async def add_product_start(message: types.Message, state: FSMContext):
     """Початок процесу додавання нового товару."""
@@ -492,7 +488,7 @@ async def process_price(message: types.Message, state: FSMContext):
     await state.set_state(NewProduct.photos)
     await message.answer("📷 Завантажте до 10 фотографій (кожне окремим повідомленням або альбомом). Коли закінчите, натисніть /done_photos")
 
-@dp.message(NewProduct.photos, F.content_type == types.ContentType.PHOTO) # Використання F.content_type
+@dp.message(NewProduct.photos, F.content_type == types.ContentType.PHOTO)
 async def process_photos(message: types.Message, state: FSMContext):
     """Обробка фотографій товару."""
     user_data = await state.get_data()
@@ -504,7 +500,7 @@ async def process_photos(message: types.Message, state: FSMContext):
     else:
         await message.answer("Ви вже додали максимальну кількість фотографій (10). Натисніть /done_photos")
 
-@dp.message(NewProduct.photos, Command("done_photos")) # Використання Command
+@dp.message(NewProduct.photos, Command("done_photos"))
 async def done_photos(message: types.Message, state: FSMContext):
     """Завершення завантаження фотографій."""
     user_data = await state.get_data()
@@ -514,7 +510,7 @@ async def done_photos(message: types.Message, state: FSMContext):
     await state.set_state(NewProduct.location)
     await message.answer("📍 Тепер введіть геолокацію (необов'язково). Якщо не потрібно, натисніть /skip_location")
 
-@dp.message(NewProduct.photos, Command("skip_photos")) # Використання Command
+@dp.message(NewProduct.photos, Command("skip_photos"))
 async def skip_photos(message: types.Message, state: FSMContext):
     """Пропуск завантаження фотографій."""
     await state.update_data(photos=[])
@@ -529,7 +525,7 @@ async def process_location(message: types.Message, state: FSMContext):
     await state.set_state(NewProduct.description)
     await message.answer("📝 Введіть опис товару:")
 
-@dp.message(NewProduct.location, Command("skip_location")) # Використання Command
+@dp.message(NewProduct.location, Command("skip_location"))
 async def skip_location(message: types.Message, state: FSMContext):
     """Пропуск введення геолокації."""
     await state.update_data(location=None)
@@ -599,7 +595,7 @@ async def process_confirm(message: types.Message, state: FSMContext):
     
     await state.clear()
 
-@dp.message(F.text == "📋 Мої товари") # Використання F.text
+@dp.message(F.text == "📋 Мої товари")
 async def my_products(message: types.Message, state: FSMContext):
     """Показує список товарів користувача."""
     await state.clear()
@@ -620,13 +616,12 @@ async def my_products(message: types.Message, state: FSMContext):
             f"Перегляди: {product['views']}\n"
         )
         
-        # Отримуємо ID повідомлення в каналі для кнопки "Переглянути в каналі"
         full_product_data = await get_product_by_id(product['id'])
         channel_message_id = full_product_data['channel_message_id'] if full_product_data else None
 
         await message.answer(text, reply_markup=get_product_actions_keyboard(product['id'], channel_message_id, product['republish_count']))
 
-@dp.message(F.text == "📖 Правила") # Використання F.text
+@dp.message(F.text == "📖 Правила")
 async def show_rules(message: types.Message, state: FSMContext):
     """Показує правила користування ботом."""
     await state.clear()
@@ -639,7 +634,6 @@ async def show_rules(message: types.Message, state: FSMContext):
     await message.answer(rules_text, parse_mode='Markdown')
 
 # --- Обробники Callback-кнопок (Модератор) ---
-# Виправлено: Використання F.data.startswith та F.from_user.id.in_
 @dp.callback_query(F.data.startswith('publish_product_'), F.from_user.id.in_(ADMIN_IDS))
 async def process_publish_product(callback_query: types.CallbackQuery, bot: Bot):
     """Обробник кнопки 'Опублікувати' для модератора."""
@@ -650,6 +644,11 @@ async def process_publish_product(callback_query: types.CallbackQuery, bot: Bot)
         await callback_query.answer("Товар не знайдено.")
         return
     
+    if CHANNEL_ID == 0:
+        await callback_query.answer("ID каналу не налаштовано. Неможливо опублікувати.")
+        logging.error("CHANNEL_ID не встановлено, неможливо опублікувати товар.")
+        return
+
     photos_file_ids = await get_product_photos_from_db(product_id)
     media_group = []
     for file_id in photos_file_ids:
@@ -668,7 +667,6 @@ async def process_publish_product(callback_query: types.CallbackQuery, bot: Bot)
 
     try:
         if media_group:
-            # Перше фото з описом, решта без
             media_group[0].caption = caption
             media_group[0].parse_mode = 'Markdown'
 
@@ -676,10 +674,8 @@ async def process_publish_product(callback_query: types.CallbackQuery, bot: Bot)
                 chat_id=CHANNEL_ID,
                 media=media_group
             )
-            # Зберігаємо ID першого повідомлення в каналі (для посилання)
             channel_message_id = sent_messages[0].message_id
         else:
-            # Якщо фото немає, надсилаємо тільки текст
             sent_message = await bot.send_message(
                 chat_id=CHANNEL_ID,
                 text=caption,
@@ -690,10 +686,8 @@ async def process_publish_product(callback_query: types.CallbackQuery, bot: Bot)
         await update_product_status(product_id, 'published', channel_message_id)
         await callback_query.answer("Товар опубліковано!")
         
-        # Повідомляємо користувача
         await bot.send_message(product['user_id'], f"✅ Ваш товар «{product['name']}» опубліковано в каналі!")
         
-        # Видаляємо повідомлення модератора з кнопками
         if product['moderator_message_id']:
             try:
                 await bot.delete_message(callback_query.message.chat.id, product['moderator_message_id'])
@@ -701,10 +695,9 @@ async def process_publish_product(callback_query: types.CallbackQuery, bot: Bot)
                 logging.warning(f"Не вдалося видалити повідомлення модератора: {e}")
 
     except Exception as e:
-        logging.error(f"Помилка публікації товару: {e}")
+        logging.error(f"❌ Помилка публікації товару: {e}")
         await callback_query.answer("Помилка при публікації товару.")
 
-# Виправлено: Використання F.data.startswith та F.from_user.id.in_
 @dp.callback_query(F.data.startswith('reject_product_'), F.from_user.id.in_(ADMIN_IDS))
 async def process_reject_product(callback_query: types.CallbackQuery, bot: Bot):
     """Обробник кнопки 'Відхилити' для модератора."""
@@ -716,20 +709,17 @@ async def process_reject_product(callback_query: types.CallbackQuery, bot: Bot):
         return
     
     await update_product_status(product_id, 'rejected')
-    await delete_product_from_db(product_id) # Видаляємо товар з БД при відхиленні
+    await delete_product_from_db(product_id)
     await callback_query.answer("Товар відхилено.")
     
-    # Повідомляємо користувача
     await bot.send_message(product['user_id'], f"❌ Ваш товар «{product['name']}» відхилено модератором.")
     
-    # Видаляємо повідомлення модератора з кнопками
     if product['moderator_message_id']:
         try:
             await bot.delete_message(callback_query.message.chat.id, product['moderator_message_id'])
         except Exception as e:
             logging.warning(f"Не вдалося видалити повідомлення модератора: {e}")
 
-# Виправлено: Використання F.data.startswith та F.from_user.id.in_
 @dp.callback_query(F.data.startswith('rotate_photos_'), F.from_user.id.in_(ADMIN_IDS))
 async def process_rotate_photos(callback_query: types.CallbackQuery, state: FSMContext, bot: Bot):
     """Обробник кнопки 'Повернути фото' для модератора."""
@@ -755,7 +745,6 @@ async def process_rotate_photos(callback_query: types.CallbackQuery, state: FSMC
     await state.set_state(ModeratorActions.rotating_photos)
     await callback_query.answer("Переходимо в режим редагування фото.")
     
-    # Надсилаємо перше фото для редагування
     await send_photo_for_rotation(callback_query.message.chat.id, product_id, 0, photos_file_ids[0], bot)
 
 async def send_photo_for_rotation(chat_id: int, product_id: int, photo_index: int, file_id: str, bot: Bot):
@@ -766,7 +755,6 @@ async def send_photo_for_rotation(chat_id: int, product_id: int, photo_index: in
         caption=f"Фото {photo_index + 1}/{len(await get_product_photos_from_db(product_id))}",
         reply_markup=get_photo_rotation_keyboard(product_id, photo_index)
     )
-    # Оновлюємо повідомлення з кнопкою "Готово"
     product = await get_product_by_id(product_id)
     if product and product['moderator_message_id']:
         try:
@@ -779,7 +767,6 @@ async def send_photo_for_rotation(chat_id: int, product_id: int, photo_index: in
             logging.warning(f"Не вдалося оновити повідомлення модератора для кнопки 'Готово': {e}")
 
 
-# Виправлено: Використання F.data.startswith та F.from_user.id.in_
 @dp.callback_query(F.data.startswith('rotate_single_photo_'), ModeratorActions.rotating_photos, F.from_user.id.in_(ADMIN_IDS))
 async def process_rotate_single_photo(callback_query: types.CallbackQuery, state: FSMContext, bot: Bot):
     """Обробник кнопки 'Повернути фото на 90°' для модератора."""
@@ -795,22 +782,17 @@ async def process_rotate_single_photo(callback_query: types.CallbackQuery, state
     original_file_id = user_data['rotated_photos_file_ids'][photo_index]
 
     try:
-        # Завантажуємо фото
         file_info = await bot.get_file(original_file_id)
         downloaded_file = await bot.download_file(file_info.file_path)
         
-        # Відкриваємо зображення за допомогою PIL
         image = Image.open(io.BytesIO(downloaded_file.read()))
         
-        # Повертаємо на 90 градусів
         rotated_image = image.rotate(-90, expand=True)
 
-        # Зберігаємо повернуте зображення в буфер
         byte_arr = io.BytesIO()
         rotated_image.save(byte_arr, format='JPEG')
         byte_arr.seek(0)
 
-        # Надсилаємо повернуте фото назад в Telegram і отримуємо новий file_id
         uploaded_photo = await bot.send_photo(
             chat_id=callback_query.message.chat.id,
             photo=BufferedInputFile(byte_arr.getvalue(), filename=f"rotated_photo_{product_id}_{photo_index}.jpg"),
@@ -818,12 +800,10 @@ async def process_rotate_single_photo(callback_query: types.CallbackQuery, state
         )
         new_file_id = uploaded_photo.photo[-1].file_id
 
-        # Оновлюємо file_id в стані FSM
         user_data['rotated_photos_file_ids'][photo_index] = new_file_id
         await state.update_data(rotated_photos_file_ids=user_data['rotated_photos_file_ids'])
         await callback_query.answer("Фото повернуто.")
         
-        # Оновлюємо повідомлення з кнопкою для поточного фото
         await bot.edit_message_reply_markup(
             chat_id=callback_query.message.chat.id,
             message_id=callback_query.message.message_id,
@@ -831,10 +811,9 @@ async def process_rotate_single_photo(callback_query: types.CallbackQuery, state
         )
 
     except Exception as e:
-        logging.error(f"Помилка повороту фото: {e}")
+        logging.error(f"❌ Помилка повороту фото: {e}")
         await callback_query.answer("Помилка при повороті фотографії.")
 
-# Виправлено: Використання F.data.startswith та F.from_user.id.in_
 @dp.callback_query(F.data.startswith('done_rotating_photos_'), ModeratorActions.rotating_photos, F.from_user.id.in_(ADMIN_IDS))
 async def process_done_rotating_photos(callback_query: types.CallbackQuery, state: FSMContext, bot: Bot):
     """Обробник кнопки 'Готово' після редагування фото."""
@@ -849,7 +828,6 @@ async def process_done_rotating_photos(callback_query: types.CallbackQuery, stat
 
     product = await get_product_by_id(product_id)
     if product:
-        # Повідомляємо користувача про оновлення фото
         await bot.send_message(
             product['user_id'],
             "🔄 Ваш товар оновлено.\n"
@@ -857,7 +835,6 @@ async def process_done_rotating_photos(callback_query: types.CallbackQuery, stat
             "Перевірте та подайте повторно, якщо потрібно.",
             reply_markup=get_main_menu_keyboard()
         )
-        # Надсилаємо товар на повторну модерацію
         await update_product_status(product_id, 'moderation')
         await send_product_to_moderation(product_id, product['user_id'], product['username'])
     
@@ -865,7 +842,6 @@ async def process_done_rotating_photos(callback_query: types.CallbackQuery, stat
     await state.clear()
 
 # --- Обробники Callback-кнопок (Користувач) ---
-# Виправлено: Використання F.data.startswith
 @dp.callback_query(F.data.startswith('republish_product_'))
 async def process_republish_product(callback_query: types.CallbackQuery, bot: Bot):
     """Обробник кнопки 'Переопублікувати' для користувача."""
@@ -887,7 +863,6 @@ async def process_republish_product(callback_query: types.CallbackQuery, bot: Bo
     await callback_query.answer(f"Товар надіслано на переопублікацію. Залишилось {3 - new_republish_count} спроб.")
     await bot.send_message(product['user_id'], f"🔁 Ваш товар «{product['name']}» надіслано на повторну модерацію.")
 
-# Виправлено: Використання F.data.startswith
 @dp.callback_query(F.data.startswith('sold_product_'))
 async def process_sold_product(callback_query: types.CallbackQuery, bot: Bot):
     """Обробник кнопки 'Продано' для користувача."""
@@ -899,22 +874,20 @@ async def process_sold_product(callback_query: types.CallbackQuery, bot: Bot):
         return
     
     try:
-        # Припускаємо, що ціна може бути у форматі "ЧИСЛО грн" або "ЧИСЛО USD"
         price_value = 0
         if "грн" in product['price'].lower():
             price_value = float(product['price'].lower().replace('грн', '').strip())
         elif "usd" in product['price'].lower():
-            price_value = float(product['price'].lower().replace('usd', '').strip()) * 40 # Приклад курсу
+            price_value = float(product['price'].lower().replace('usd', '').strip()) * 40
         else:
             await callback_query.answer("Не вдалося розрахувати комісію. Будь ласка, вкажіть ціну в грн або USD.")
             return
 
-        commission = price_value * 0.10 # 10% комісія
+        commission = price_value * 0.10
         
         await update_product_status(product_id, 'sold')
         
-        # Видаляємо товар з каналу, якщо він був опублікований
-        if product['channel_message_id'] and CHANNEL_ID != 0: # Перевіряємо, чи CHANNEL_ID встановлено
+        if product['channel_message_id'] and CHANNEL_ID != 0:
             try:
                 await bot.delete_message(CHANNEL_ID, product['channel_message_id'])
             except Exception as e:
@@ -930,10 +903,9 @@ async def process_sold_product(callback_query: types.CallbackQuery, bot: Bot):
     except ValueError:
         await callback_query.answer("Не вдалося розрахувати комісію. Перевірте формат ціни.")
     except Exception as e:
-        logging.error(f"Помилка при обробці 'Продано': {e}")
+        logging.error(f"❌ Помилка при обробці 'Продано': {e}")
         await callback_query.answer("Виникла помилка.")
 
-# Виправлено: Використання F.data.startswith
 @dp.callback_query(F.data.startswith('change_price_'))
 async def process_change_price(callback_query: types.CallbackQuery, state: FSMContext):
     """Обробник кнопки 'Змінити ціну' для користувача."""
@@ -957,7 +929,6 @@ async def process_new_price(message: types.Message, state: FSMContext):
     
     await update_product_price(product_id, new_price)
     
-    # Оновлюємо статус на модерацію, щоб модератор міг перевірити нову ціну
     await update_product_status(product_id, 'moderation')
     product = await get_product_by_id(product_id)
     if product:
@@ -966,7 +937,6 @@ async def process_new_price(message: types.Message, state: FSMContext):
     await message.answer(f"Ціну товару оновлено на '{new_price}' і відправлено на повторну модерацію.", reply_markup=get_main_menu_keyboard())
     await state.clear()
 
-# Виправлено: Використання F.data.startswith
 @dp.callback_query(F.data.startswith('delete_product_'))
 async def process_delete_product(callback_query: types.CallbackQuery, bot: Bot):
     """Обробник кнопки 'Видалити' для користувача."""
@@ -979,8 +949,7 @@ async def process_delete_product(callback_query: types.CallbackQuery, bot: Bot):
     
     await delete_product_from_db(product_id)
     
-    # Видаляємо товар з каналу, якщо він був опублікований
-    if product['channel_message_id'] and CHANNEL_ID != 0: # Перевіряємо, чи CHANNEL_ID встановлено
+    if product['channel_message_id'] and CHANNEL_ID != 0:
         try:
             await bot.delete_message(CHANNEL_ID, product['channel_message_id'])
         except Exception as e:
@@ -991,43 +960,40 @@ async def process_delete_product(callback_query: types.CallbackQuery, bot: Bot):
 
 
 # --- Налаштування Webhook для Flask ---
-WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
-# WEBHOOK_URL буде встановлено через змінну оточення на Render.com
-# Наприклад: https://your-app-name.onrender.com
-# Повний URL для Webhook буде: https://your-app-name.onrender.com/webhook/YOUR_BOT_TOKEN
+app = Flask(__name__)
 
-app = Flask(__name__) # Ініціалізація Flask-додатку
-
-@app.route(WEBHOOK_PATH, methods=['POST'])
-async def telegram_webhook():
-    if request.headers.get('content-type') == 'application/json':
-        json_string = request.get_data().decode("utf-8")
-        update = types.Update.to_object(json_string)
-        
-        asyncio.create_task(dp.process_update(update, bot=bot)) 
-        return 'ok'
-    else:
-        abort(403)
-
+# Перенесено визначення WEBHOOK_PATH всередину функції, щоб BOT_TOKEN був доступний
+# і перевірений.
 async def set_webhook_on_start():
     """Встановлює Webhook при запуску."""
-    if not WEBHOOK_URL or not BOT_TOKEN:
-        logging.error("WEBHOOK_URL або BOT_TOKEN не встановлено. Webhook не буде налаштовано.")
+    if not WEBHOOK_URL:
+        logging.error("❌ WEBHOOK_URL не встановлено. Webhook не буде налаштовано.")
+        return
+    if not BOT_TOKEN:
+        logging.error("❌ BOT_TOKEN не встановлено. Webhook не буде налаштовано.")
         return
 
+    WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
     full_webhook_url = f"{WEBHOOK_URL}{WEBHOOK_PATH}"
+    logging.info(f"ℹ️ Спроба встановити Webhook на: {full_webhook_url}")
     try:
-        await bot.set_webhook(full_webhook_url)
-        logging.info(f"Webhook встановлено на: {full_webhook_url}")
+        # Перевіряємо поточний вебхук, щоб уникнути зайвих запитів
+        current_webhook_info = await bot.get_webhook_info()
+        if current_webhook_info.url != full_webhook_url:
+            await bot.set_webhook(full_webhook_url)
+            logging.info(f"✅ Webhook успішно встановлено на: {full_webhook_url}")
+        else:
+            logging.info(f"✅ Webhook вже встановлено на: {full_webhook_url}. Пропуск налаштування.")
     except Exception as e:
-        logging.error(f"Помилка встановлення Webhook: {e}")
+        logging.error(f"❌ Помилка встановлення Webhook: {e}")
 
 
 async def on_startup_wrapper():
     """Обгортка для on_startup, щоб викликати set_webhook_on_start."""
+    logging.info("🚀 Запуск бота...")
     await init_db()
     await set_webhook_on_start()
-    logging.info("Бот запущено та Webhook встановлено!")
+    logging.info("🎉 Бот запущено та готовий до роботи!")
 
 if __name__ == '__main__':
     pass
