@@ -15,6 +15,7 @@ import psycopg2
 from psycopg2 import sql
 from datetime import datetime
 import html # Імпортуємо модуль html для екранування
+from aiogram.exceptions import TelegramAPIError # Імпортуємо для обробки помилок API
 
 # Для Aiohttp Webhook
 from aiohttp import web
@@ -693,10 +694,13 @@ async def process_publish_product(callback_query: types.CallbackQuery, bot: Bot)
             
             for i in range(0, len(media_group), 10):
                 chunk = media_group[i:i+10]
-                await bot.send_media_group(
+                sent_messages_in_channel = await bot.send_media_group(
                     chat_id=CHANNEL_ID,
                     media=chunk
                 )
+                # Зберігаємо message_id першого повідомлення групи
+                if i == 0:
+                    channel_message_id = sent_messages_in_channel[0].message_id
         else:
             sent_message_in_channel = await bot.send_message(
                 chat_id=CHANNEL_ID,
@@ -718,9 +722,18 @@ async def process_publish_product(callback_query: types.CallbackQuery, bot: Bot)
             except Exception as e:
                 logging.warning(f"Не вдалося видалити повідомлення модератора: {e}")
 
+    except TelegramAPIError as e: # Ловимо специфічні помилки Telegram API
+        logging.error(f"❌ Помилка Telegram API при публікації товару {product_id} в канал: {e}")
+        await callback_query.answer(f"Помилка при публікації товару в канал: {e.message}. Перевірте права бота.")
+        # Додатково повідомляємо модератора про помилку в чаті
+        await bot.send_message(callback_query.from_user.id, 
+                               f"❗️ Помилка публікації товару {html.escape(product['name'])} в канал: {html.escape(e.message)}. "
+                               "Переконайтеся, що бот є адміністратором каналу та має дозвіл на публікацію повідомлень.",
+                               parse_mode='HTML')
     except Exception as e:
-        logging.error(f"❌ Помилка публікації товару: {e}")
-        await callback_query.answer("Помилка при публікації товару.")
+        logging.error(f"❌ Невідома помилка при публікації товару {product_id}: {e}")
+        await callback_query.answer("Виникла невідома помилка при публікації товару.")
+
 
 @dp.callback_query(F.data.startswith('reject_product_'), F.from_user.id.in_(ADMIN_IDS))
 async def process_reject_product(callback_query: types.CallbackQuery, bot: Bot):
