@@ -415,35 +415,32 @@ async def send_product_to_moderation(product_id: int, user_id: int, username: st
             await bot.send_message(user_id, "Наразі модератори недоступні. Спробуйте пізніше.")
             return
 
-        moderator_messages = []
-        
+        # Відправляємо медіа-групу модератору
+        # Розбиваємо на групи по 10 фото, якщо їх більше
         if media_group:
             media_group[0].caption = caption
             media_group[0].parse_mode = 'Markdown'
             
             for i in range(0, len(media_group), 10):
                 chunk = media_group[i:i+10]
-                sent_messages = await bot.send_media_group(
+                await bot.send_media_group(
                     chat_id=ADMIN_IDS[0],
                     media=chunk
                 )
-                moderator_messages.extend(sent_messages)
-
-            moderator_keyboard_message = await bot.send_message(
-                chat_id=ADMIN_IDS[0],
-                text="Оберіть дію:",
-                reply_markup=get_product_moderation_keyboard(product_id)
-            )
-            await update_product_moderator_message_id(product_id, moderator_keyboard_message.message_id)
-
         else:
-            moderator_message = await bot.send_message(
+            await bot.send_message(
                 chat_id=ADMIN_IDS[0],
                 text=caption,
-                parse_mode='Markdown',
-                reply_markup=get_product_moderation_keyboard(product_id)
+                parse_mode='Markdown'
             )
-            await update_product_moderator_message_id(product_id, moderator_message.message_id)
+
+        # Відправляємо окреме повідомлення з кнопками модерації
+        moderator_keyboard_message = await bot.send_message(
+            chat_id=ADMIN_IDS[0],
+            text="Оберіть дію для товару:",
+            reply_markup=get_product_moderation_keyboard(product_id)
+        )
+        await update_product_moderator_message_id(product_id, moderator_keyboard_message.message_id)
 
         logging.info(f"✅ Товар {product_id} надіслано на модерацію.")
     except Exception as e:
@@ -480,21 +477,17 @@ async def process_price(message: types.Message, state: FSMContext):
     logging.info(f"Користувач {message.from_user.id} ввів ціну: {message.text}")
     await state.update_data(price=message.text, photos=[])
     await state.set_state(NewProduct.photos)
-    await message.answer("📷 Завантажте до 10 фотографій (кожне окремим повідомленням або альбомом). Коли закінчите, натисніть /done_photos")
+    await message.answer("📷 Завантажте фотографії (кожне окремим повідомленням або альбомом). Коли закінчите, натисніть /done_photos")
 
 @dp.message(NewProduct.photos, F.content_type == types.ContentType.PHOTO)
 async def process_photos(message: types.Message, state: FSMContext):
-    """Обробка фотографій товару."""
+    """Обробка фотографій товару. Приймає будь-яку кількість фото."""
     user_data = await state.get_data()
     photos = user_data.get('photos', [])
-    if len(photos) < 10:
-        photos.append(message.photo[-1].file_id)
-        await state.update_data(photos=photos)
-        logging.info(f"Користувач {message.from_user.id} додав фото. Всього: {len(photos)}")
-        await message.answer(f"Фото {len(photos)} додано. Залишилось {10 - len(photos)}.")
-    else:
-        logging.info(f"Користувач {message.from_user.id} спробував додати більше 10 фото.")
-        await message.answer("Ви вже додали максимальну кількість фотографій (10). Натисніть /done_photos")
+    photos.append(message.photo[-1].file_id)
+    await state.update_data(photos=photos)
+    logging.info(f"Користувач {message.from_user.id} додав фото. Всього: {len(photos)}")
+    await message.answer(f"Фото {len(photos)} додано. Ви можете додати більше або натисніть /done_photos, щоб продовжити.")
 
 @dp.message(NewProduct.photos, Command("done_photos"))
 async def done_photos(message: types.Message, state: FSMContext):
