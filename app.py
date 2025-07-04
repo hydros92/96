@@ -92,6 +92,13 @@ async def init_db():
     try:
         conn = get_db_connection()
         cur = conn.cursor()
+        
+        # --- ТИМЧАСОВО: Видаляємо таблиці, щоб забезпечити чисту схему для відлагодження ---
+        # !!! УВАГА: У продакшн-середовищі ці рядки слід видалити, щоб уникнути втрати даних !!!
+        cur.execute("DROP TABLE IF EXISTS product_photos CASCADE;")
+        cur.execute("DROP TABLE IF EXISTS products CASCADE;")
+        # --- КІНЕЦЬ ТИМЧАСОВОГО БЛОКУ ---
+
         cur.execute("""
             CREATE TABLE IF NOT EXISTS products (
                 id SERIAL PRIMARY KEY,
@@ -631,7 +638,7 @@ async def show_rules(message: types.Message, state: FSMContext):
         "📌 **Умови користування:**\n\n"
         " * 🧾 Покупець оплачує доставку.\n"
         " * 💰 Продавець сплачує комісію платформи: **10%**\n"
-        f" * 💳 Оплата комісії на Monobank: `{MONOBANK_CARD_NUMBER}`"
+        f" * 💳 Оплата комісії на Monobank: {MONOBANK_CARD_NUMBER}" # ВИПРАВЛЕНО: Прибрано зворотні апострофи
     )
     await message.answer(rules_text, parse_mode='Markdown')
 
