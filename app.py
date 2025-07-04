@@ -14,6 +14,7 @@ import asyncio
 import psycopg2
 from psycopg2 import sql
 from datetime import datetime
+import html # Імпортуємо модуль html для екранування
 
 # Для Aiohttp Webhook
 from aiohttp import web
@@ -25,7 +26,7 @@ load_dotenv()
 # Налаштування логування
 logging.basicConfig(level=logging.INFO)
 
-# Отримання змінних оточення
+# --- Глобальні константи та змінні оточення ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 ADMIN_IDS_STR = os.getenv("ADMIN_IDS", "")
@@ -34,14 +35,21 @@ ADMIN_IDS = [int(admin_id) for admin_id in ADMIN_IDS_STR.split(',') if admin_id.
 CHANNEL_ID_STR = os.getenv("CHANNEL_ID", "0")
 CHANNEL_ID = int(CHANNEL_ID_STR) if CHANNEL_ID_STR.strip().lstrip('-').isdigit() else 0
 
-MONOBANK_CARD_NUMBER = os.getenv("MONOBANK_CARD_NUMBER", "")
+# Оновлений номер картки Monobank.
+# Рекомендація: для продакшн-середовища краще зберігати такі дані у змінних оточення (наприклад, .env),
+# а не хардкодити безпосередньо в коді для більшої гнучкості та безпеки.
+MONOBANK_CARD_NUMBER = "4441111153021484" 
 
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "") 
+
+# Конфігурація комісії та курсів
+COMMISSION_RATE = 0.10 # 10% комісія
+USD_TO_UAH_RATE = 40 # Приблизний курс USD до UAH
+MAX_REPUBLISH_COUNT = 3 # Максимальна кількість переопублікацій
 
 # Перевірка на наявність критичних змінних
 if not BOT_TOKEN:
     logging.error("❌ BOT_TOKEN не встановлено! Бот не зможе працювати без токена.")
-    # Якщо токен відсутній, виходимо, оскільки бот не може працювати
     exit(1) 
 if not ADMIN_IDS:
     logging.warning("⚠️ ADMIN_IDS не встановлено або порожнє. Функції модерації можуть бути недоступні.")
@@ -93,11 +101,9 @@ async def init_db():
         conn = get_db_connection()
         cur = conn.cursor()
         
-        # --- ТИМЧАСОВО: Видаляємо таблиці, щоб забезпечити чисту схему для відлагодження ---
-        # !!! УВАГА: У продакшн-середовищі ці рядки слід видалити, щоб уникнути втрати даних !!!
-        cur.execute("DROP TABLE IF EXISTS product_photos CASCADE;")
-        cur.execute("DROP TABLE IF EXISTS products CASCADE;")
-        # --- КІНЕЦЬ ТИМЧАСОВОГО БЛОКУ ---
+        # Ці рядки були видалені, щоб запобігти втраті даних при кожному запуску.
+        # cur.execute("DROP TABLE IF EXISTS product_photos CASCADE;")
+        # cur.execute("DROP TABLE IF EXISTS products CASCADE;")
 
         cur.execute("""
             CREATE TABLE IF NOT EXISTS products (
@@ -229,6 +235,10 @@ async def get_user_products(user_id: int):
                 'republish_count': row[6]
             })
         return products
+    except psycopg2.ProgrammingError as e:
+        logging.error(f"❌ Помилка отримання товарів користувача: {e}")
+        logging.error("Можливо, схема бази даних не відповідає очікуваній. Спробуйте перезапустити бота.")
+        return []
     except Exception as e:
         logging.error(f"❌ Помилка отримання товарів користувача: {e}")
         return []
@@ -372,7 +382,7 @@ def get_product_actions_keyboard(product_id: int, channel_message_id: int, repub
     if channel_message_id and CHANNEL_ID != 0:
         channel_short_id = str(CHANNEL_ID).replace('-100', '')
         buttons.append([InlineKeyboardButton(text="👁 Переглянути в каналі", url=f"https://t.me/c/{channel_short_id}/{channel_message_id}")]) 
-    if republish_count < 3:
+    if republish_count < MAX_REPUBLISH_COUNT: # Використання константи
         buttons.append([InlineKeyboardButton(text="🔁 Переопублікувати", callback_data=f"republish_product_{product_id}")])
     buttons.append([InlineKeyboardButton(text="✅ Продано", callback_data=f"sold_product_{product_id}")])
     buttons.append([InlineKeyboardButton(text="✏ Змінити ціну", callback_data=f"change_price_{product_id}")])
@@ -406,15 +416,17 @@ async def send_product_to_moderation(product_id: int, user_id: int, username: st
         media_group.append(InputMediaPhoto(media=file_id))
 
     caption = (
-        f"**Новий товар на модерацію:**\n\n"
-        f"📦 Назва: {product['name']}\n"
-        f"💰 Ціна: {product['price']}\n"
-        f"📝 Опис: {product['description']}\n"
-        f"🚚 Доставка: {product['delivery']}\n"
+        f"<b>Новий товар на модерацію:</b>\n\n"
+        f"📦 Назва: {html.escape(product['name'])}\n"
+        f"💰 Ціна: {html.escape(product['price'])}\n"
+        f"📝 Опис: {html.escape(product['description'])}\n"
+        f"🚚 Доставка: {html.escape(product['delivery'])}\n"
     )
+    # Перевіряємо, чи існує username, перш ніж його екранувати
+    escaped_username = html.escape(username) if username else None
     if product['location']:
-        caption += f"📍 Геолокація: {product['location']}\n"
-    caption += f"👤 Продавець: @{username}" if username else f"👤 Продавець: <a href='tg://user?id={user_id}'>{user_id}</a>"
+        caption += f"📍 Геолокація: {html.escape(product['location'])}\n"
+    caption += f"👤 Продавець: @{escaped_username}" if escaped_username else f"👤 Продавець: <a href='tg://user?id={user_id}'>{user_id}</a>"
 
     try:
         if not ADMIN_IDS:
@@ -426,7 +438,7 @@ async def send_product_to_moderation(product_id: int, user_id: int, username: st
         # Розбиваємо на групи по 10 фото, якщо їх більше
         if media_group:
             media_group[0].caption = caption
-            media_group[0].parse_mode = 'Markdown'
+            media_group[0].parse_mode = 'HTML' 
             
             for i in range(0, len(media_group), 10):
                 chunk = media_group[i:i+10]
@@ -438,7 +450,7 @@ async def send_product_to_moderation(product_id: int, user_id: int, username: st
             await bot.send_message(
                 chat_id=ADMIN_IDS[0],
                 text=caption,
-                parse_mode='Markdown'
+                parse_mode='HTML' 
             )
 
         # Відправляємо окреме повідомлення з кнопками модерації
@@ -511,7 +523,7 @@ async def done_photos(message: types.Message, state: FSMContext):
 @dp.message(NewProduct.photos, Command("skip_photos"))
 async def skip_photos(message: types.Message, state: FSMContext):
     """Пропуск завантаження фотографій."""
-    logging.info(f"Користувач {message.from_user.id} пропустив завантаження фото.")
+    logging.info(f"Користувач {message.from_user.id} пропустив введення геолокації.")
     await state.update_data(photos=[])
     await state.set_state(NewProduct.location)
     await message.answer("📍 Тепер введіть геолокацію (необов'язково). Якщо не потрібно, натисніть /skip_location")
@@ -554,13 +566,13 @@ async def process_delivery(message: types.Message, state: FSMContext):
     
     confirmation_text = (
         f"Будь ласка, перевірте введені дані:\n\n"
-        f"📦 Назва: {user_data['name']}\n"
-        f"💰 Ціна: {user_data['price']}\n"
-        f"📝 Опис: {user_data['description']}\n"
-        f"🚚 Доставка: {user_data['delivery']}\n"
+        f"📦 Назва: {html.escape(user_data['name'])}\n"
+        f"💰 Ціна: {html.escape(user_data['price'])}\n"
+        f"📝 Опис: {html.escape(user_data['description'])}\n"
+        f"🚚 Доставка: {html.escape(user_data['delivery'])}\n"
     )
     if user_data['location']:
-        confirmation_text += f"📍 Геолокація: {user_data['location']}\n"
+        confirmation_text += f"📍 Геолокація: {html.escape(user_data['location'])}\n"
     
     keyboard_buttons = [
         [types.KeyboardButton(text="✅ Підтвердити")],
@@ -568,7 +580,7 @@ async def process_delivery(message: types.Message, state: FSMContext):
     ]
     
     await state.set_state(NewProduct.confirm)
-    await message.answer(confirmation_text, reply_markup=types.ReplyKeyboardMarkup(keyboard=keyboard_buttons, resize_keyboard=True))
+    await message.answer(confirmation_text, reply_markup=types.ReplyKeyboardMarkup(keyboard=keyboard_buttons, resize_keyboard=True), parse_mode='HTML')
 
 @dp.message(NewProduct.confirm)
 async def process_confirm(message: types.Message, state: FSMContext):
@@ -594,7 +606,7 @@ async def process_confirm(message: types.Message, state: FSMContext):
                 await add_product_photo_to_db(product_id, file_id, i)
             
             await send_product_to_moderation(product_id, user_id, username)
-            await message.answer(f"✅ Товар «{user_data['name']}» надіслано на модерацію. Очікуйте!", reply_markup=get_main_menu_keyboard())
+            await message.answer(f"✅ Товар «{html.escape(user_data['name'])}» надіслано на модерацію. Очікуйте!", reply_markup=get_main_menu_keyboard(), parse_mode='HTML')
         else:
             await message.answer("Виникла помилка при збереженні товару. Спробуйте ще раз.", reply_markup=get_main_menu_keyboard())
     else:
@@ -617,8 +629,8 @@ async def my_products(message: types.Message, state: FSMContext):
         status_text = "Опубліковано" if product['status'] == 'published' else "На модерації"
         
         text = (
-            f"📦 Назва: {product['name']}\n"
-            f"💰 Ціна: {product['price']}\n"
+            f"📦 Назва: {html.escape(product['name'])}\n"
+            f"💰 Ціна: {html.escape(product['price'])}\n"
             f"Статус: {status_emoji} {status_text}\n"
             f"Дата: {product['created_at'].strftime('%d.%m.%Y %H:%M')}\n"
             f"Перегляди: {product['views']}\n"
@@ -627,20 +639,16 @@ async def my_products(message: types.Message, state: FSMContext):
         full_product_data = await get_product_by_id(product['id'])
         channel_message_id = full_product_data['channel_message_id'] if full_product_data else None
 
-        await message.answer(text, reply_markup=get_product_actions_keyboard(product['id'], channel_message_id, product['republish_count']))
+        await message.answer(text, reply_markup=get_product_actions_keyboard(product['id'], channel_message_id, product['republish_count']), parse_mode='HTML')
 
 @dp.message(F.text == "📖 Правила")
 async def show_rules(message: types.Message, state: FSMContext):
     """Показує правила користування ботом."""
     logging.info(f"Користувач {message.from_user.id} переглядає правила.")
     await state.clear()
-    rules_text = (
-        "📌 **Умови користування:**\n\n"
-        " * 🧾 Покупець оплачує доставку.\n"
-        " * 💰 Продавець сплачує комісію платформи: **10%**\n"
-        f" * 💳 Оплата комісії на Monobank: {MONOBANK_CARD_NUMBER}" # ВИПРАВЛЕНО: Прибрано зворотні апострофи
-    )
-    await message.answer(rules_text, parse_mode='Markdown')
+    # Замінюємо складний текст правил на простий надпис за запитом користувача
+    simple_rules_text = "Продавець оплачує комісію, покупець - доставку товару."
+    await message.answer(simple_rules_text) # Без parse_mode, оскільки текст простий
 
 # --- Обробники Callback-кнопок (Модератор) ---
 @dp.callback_query(F.data.startswith('publish_product_'), F.from_user.id.in_(ADMIN_IDS))
@@ -665,51 +673,48 @@ async def process_publish_product(callback_query: types.CallbackQuery, bot: Bot)
         media_group.append(InputMediaPhoto(media=file_id))
 
     caption = (
-        f"**Новий товар:**\n\n" # Змінено на "Новий товар" для публікації
-        f"📦 Назва: {product['name']}\n"
-        f"💰 Ціна: {product['price']}\n"
-        f"📝 Опис: {product['description']}\n"
-        f"🚚 Доставка: {product['delivery']}\n"
+        f"<b>Новий товар:</b>\n\n"
+        f"📦 Назва: {html.escape(product['name'])}\n"
+        f"💰 Ціна: {html.escape(product['price'])}\n"
+        f"📝 Опис: {html.escape(product['description'])}\n"
+        f"🚚 Доставка: {html.escape(product['delivery'])}\n"
     )
+    # Перевіряємо, чи існує username, перш ніж його екранувати
+    escaped_username = html.escape(product['username']) if product['username'] else None
     if product['location']:
-        caption += f"📍 Геолокація: {product['location']}\n"
-    caption += f"👤 Продавець: @{product['username']}" if product['username'] else f"👤 Продавець: <a href='tg://user?id={product['user_id']}'>{product['user_id']}</a>"
+        caption += f"📍 Геолокація: {html.escape(product['location'])}\n"
+    caption += f"👤 Продавець: @{escaped_username}" if escaped_username else f"👤 Продавець: <a href='tg://user?id={product['user_id']}'>{product['user_id']}</a>"
 
     try:
         channel_message_id = None
         if media_group:
             media_group[0].caption = caption
-            media_group[0].parse_mode = 'Markdown'
+            media_group[0].parse_mode = 'HTML'
             
-            # Відправляємо медіа-групу в канал
-            # Telegram API дозволяє до 10 фото в media_group
-            sent_messages_in_channel = await bot.send_media_group(
-                chat_id=CHANNEL_ID,
-                media=media_group
-            )
-            channel_message_id = sent_messages_in_channel[0].message_id
+            for i in range(0, len(media_group), 10):
+                chunk = media_group[i:i+10]
+                await bot.send_media_group(
+                    chat_id=CHANNEL_ID,
+                    media=chunk
+                )
         else:
             sent_message_in_channel = await bot.send_message(
                 chat_id=CHANNEL_ID,
                 text=caption,
-                parse_mode='Markdown'
+                parse_mode='HTML'
             )
             channel_message_id = sent_message_in_channel.message_id
         
         await update_product_status(product_id, 'published', channel_message_id)
         await callback_query.answer("Товар опубліковано!")
         
-        await bot.send_message(product['user_id'], f"✅ Ваш товар «{product['name']}» опубліковано в каналі!")
+        await bot.send_message(product['user_id'], f"✅ Ваш товар «{html.escape(product['name'])}» опубліковано в каналі!", parse_mode='HTML')
         
         # Видаляємо повідомлення модератору з кнопками та фото
         if product['moderator_message_id']:
             try:
                 # Видаляємо повідомлення з кнопками модерації
                 await bot.delete_message(callback_query.message.chat.id, product['moderator_message_id'])
-                # Telegram API не дозволяє видаляти медіа-групу одним запитом,
-                # тому для видалення фото, які були надіслані модератору,
-                # потрібно було б зберегти їх ID, що ускладнить логіку.
-                # Наразі, залишаємо їх, фокусуючись на видаленні кнопок.
             except Exception as e:
                 logging.warning(f"Не вдалося видалити повідомлення модератора: {e}")
 
@@ -732,7 +737,7 @@ async def process_reject_product(callback_query: types.CallbackQuery, bot: Bot):
     await delete_product_from_db(product_id) # Видаляємо товар повністю
     await callback_query.answer("Товар відхилено.")
     
-    await bot.send_message(product['user_id'], f"❌ Ваш товар «{product['name']}» відхилено модератором.")
+    await bot.send_message(product['user_id'], f"❌ Ваш товар «{html.escape(product['name'])}» відхилено модератором.", parse_mode='HTML')
     
     if product['moderator_message_id']:
         try:
@@ -885,16 +890,16 @@ async def process_republish_product(callback_query: types.CallbackQuery, bot: Bo
         await callback_query.answer("Товар не знайдено.")
         return
     
-    if product['republish_count'] >= 3:
-        await callback_query.answer("Ви досягли ліміту переопублікацій (3 рази).")
+    if product['republish_count'] >= MAX_REPUBLISH_COUNT: # Використання константи
+        await callback_query.answer(f"Ви досягли ліміту переопублікацій ({MAX_REPUBLISH_COUNT} рази).")
         return
 
     new_republish_count = await increment_product_republish_count(product_id)
     await update_product_status(product_id, 'moderation') # Змінюємо статус на модерацію
     await send_product_to_moderation(product_id, product['user_id'], product['username'])
     
-    await callback_query.answer(f"Товар надіслано на переопублікацію. Залишилось {3 - new_republish_count} спроб.")
-    await bot.send_message(product['user_id'], f"🔁 Ваш товар «{product['name']}» надіслано на повторну модерацію.")
+    await callback_query.answer(f"Товар надіслано на переопублікацію. Залишилось {MAX_REPUBLISH_COUNT - new_republish_count} спроб.")
+    await bot.send_message(product['user_id'], f"🔁 Ваш товар «{html.escape(product['name'])}» надіслано на повторну модерацію.", parse_mode='HTML')
 
 @dp.callback_query(F.data.startswith('sold_product_'))
 async def process_sold_product(callback_query: types.CallbackQuery, bot: Bot):
@@ -924,9 +929,9 @@ async def process_sold_product(callback_query: types.CallbackQuery, bot: Bot):
 
         # Якщо ціна вказана в USD, конвертуємо в гривні (приблизний курс)
         if "usd" in product['price'].lower():
-            price_value *= 40 # Приблизний курс USD до UAH
+            price_value *= USD_TO_UAH_RATE # Використання константи
             
-        commission = price_value * 0.10 # 10% комісія
+        commission = price_value * COMMISSION_RATE # Використання константи
         
         await update_product_status(product_id, 'sold')
         
@@ -940,9 +945,9 @@ async def process_sold_product(callback_query: types.CallbackQuery, bot: Bot):
         await callback_query.answer("Статус товару оновлено на 'Продано'.")
         await bot.send_message(
             callback_query.from_user.id,
-            f"💸 Комісія 10% = {commission:.2f} грн\n"
-            f"💳 Оплатіть на картку Monobank: `{MONOBANK_CARD_NUMBER}`",
-            parse_mode='Markdown'
+            f"💸 Комісія {int(COMMISSION_RATE * 100)}% = {commission:.2f} грн\n" # Використання константи
+            f"💳 Оплатіть на картку Monobank: <code>{html.escape(MONOBANK_CARD_NUMBER)}</code>",
+            parse_mode='HTML'
         )
     except ValueError:
         await callback_query.answer("Не вдалося розрахувати комісію. Перевірте формат ціни.")
@@ -977,7 +982,7 @@ async def process_new_price(message: types.Message, state: FSMContext):
     if product:
         await send_product_to_moderation(product_id, product['user_id'], product['username'])
 
-    await message.answer(f"Ціну товару оновлено на '{new_price}' і відправлено на повторну модерацію.", reply_markup=get_main_menu_keyboard())
+    await message.answer(f"Ціну товару оновлено на '{html.escape(new_price)}' і відправлено на повторну модерацію.", reply_markup=get_main_menu_keyboard(), parse_mode='HTML')
     await state.clear()
 
 @dp.callback_query(F.data.startswith('delete_product_'))
@@ -997,11 +1002,17 @@ async def process_delete_product(callback_query: types.CallbackQuery, bot: Bot):
     if product['channel_message_id'] and CHANNEL_ID != 0:
         try:
             await bot.delete_message(CHANNEL_ID, product['channel_message_id'])
+            # Також видаляємо повідомлення модератору, якщо воно існує
+            if product['moderator_message_id']:
+                try:
+                    await bot.delete_message(product['user_id'], product['moderator_message_id'])
+                except Exception as e:
+                    logging.warning(f"Не вдалося видалити повідомлення модератора для видаленого товару: {e}")
         except Exception as e:
             logging.warning(f"Не вдалося видалити повідомлення з каналу: {e}")
 
     await callback_query.answer("Товар видалено.")
-    await bot.send_message(callback_query.from_user.id, f"🗑 Ваш товар «{product['name']}» видалено.")
+    await bot.send_message(callback_query.from_user.id, f"🗑 Ваш товар «{html.escape(product['name'])}» видалено.", parse_mode='HTML')
 
 
 # --- Налаштування Webhook для Aiohttp ---
@@ -1089,4 +1100,3 @@ async def main():
 if __name__ == '__main__':
     # Запускаємо основну асинхронну функцію
     asyncio.run(main())
-
